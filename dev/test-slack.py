@@ -1,0 +1,955 @@
+#!/usr/bin/env python3
+"""Tests for slack.py: the parsing, and the rules about what may be fetched.
+
+Run with `python3 dev/test-slack.py`. No network and no workspace: everything
+here is either a pure function or the real code with the network answering to
+order, the way the Teams and Office 365 plugins test their helpers.
+
+What is deliberately covered: the shapes Slack actually sends (which are not
+always the shapes the documentation suggests), and every place a decision is
+made about permission or about which host gets the token. Those are the two
+classes of bug that are invisible until they matter.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+import slack  # noqa: E402
+import emoji  # noqa: E402
+
+
+class Emitted(Exception):
+    """slack.out() reached, carrying what it was about to print."""
+
+    def __init__(self, payload):
+        super().__init__("emitted")
+        self.payload = payload
+
+
+def capture(function, *args, **kwargs):
+    """Run a cmd_* function and return the JSON it tried to print."""
+    original = slack.out
+    slack.out = lambda payload: (_ for _ in ()).throw(Emitted(payload))
+    try:
+        function(*args, **kwargs)
+    except Emitted as emitted:
+        return emitted.payload
+    finally:
+        slack.out = original
+    raise AssertionError("nothing was emitted")
+
+
+class Args:
+    account = "work"
+    demo = False
+
+
+class FakeApi:
+    """A Slack that answers from a script rather than from the network."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls = []
+        self.scopes = ""
+        self.rate_limited = False
+        self.token = "xoxp-test"
+
+    def call(self, method, params=None, timeout=20, retries=1):
+        self.calls.append((method, dict(params or {})))
+        answer = self.answers.get(method, (False, {"error": "not_scripted"}))
+        return answer(params) if callable(answer) else answer
+
+    def paged(self, method, params, key, cap):
+        """One page, which is all any fixture here needs."""
+        ok, payload = self.call(method, params)
+        if not ok:
+            return [], payload.get("error", "unknown")
+        return (payload.get(key) or [])[:cap], ""
+
+
+# --------------------------------------------------------------------------
+
+
+class Names(unittest.TestCase):
+    """What may be used as a workspace alias, since it becomes a filename."""
+
+    def test_a_plain_name_is_fine(self):
+        self.assertIsNone(slack.alias_problem("work"))
+
+    def test_a_path_is_not(self):
+        self.assertIsNotNone(slack.alias_problem("../../etc/passwd"))
+        self.assertIsNotNone(slack.alias_problem(".."))
+        self.assertIsNotNone(slack.alias_problem("with space"))
+        self.assertIsNotNone(slack.alias_problem(""))
+
+    def test_a_bad_alias_never_becomes_a_path(self):
+        with self.assertRaises(slack.AccountError):
+            slack.state_path("../escape")
+
+
+class Text(unittest.TestCase):
+    """Turning Slack's mrkdwn into the words in it."""
+
+    users = {"U1": {"id": "U1", "name": "Priya Raman", "handle": "priya"}}
+    channels = {"C1": "platform"}
+
+    def flatten(self, raw):
+        return slack.text_and_links(raw, self.users, self.channels)
+
+    def test_a_mention_becomes_the_name_the_directory_knows(self):
+        # Not the label Slack's own client wrote into the entity: that one is
+        # whatever it was when the message was sent.
+        text, links = self.flatten("<@U1|old-handle> can you look?")
+        self.assertEqual(text, "@Priya Raman can you look?")
+        self.assertEqual(links, [])
+
+    def test_an_unknown_mention_keeps_something_readable(self):
+        text, _ = self.flatten("ask <@U9>")
+        self.assertEqual(text, "ask @U9")
+
+    def test_a_channel_reference_becomes_a_hash_and_a_name(self):
+        text, _ = self.flatten("see <#C1|platform>")
+        self.assertEqual(text, "see #platform")
+
+    def test_here_and_channel_are_not_links(self):
+        text, links = self.flatten("<!here> deploy is out")
+        self.assertEqual(text, "@here deploy is out")
+        self.assertEqual(links, [])
+
+    def test_a_date_entity_falls_back_to_the_words_slack_wrote_for_it(self):
+        text, _ = self.flatten("posted <!date^1392734382^{date}|18 Feb 2014>")
+        self.assertEqual(text, "posted 18 Feb 2014")
+
+    def test_a_labelled_link_keeps_its_address_out_of_the_words(self):
+        text, links = self.flatten("put it in <https://example.com/notes|the release notes>")
+        self.assertEqual(text, "put it in the release notes")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["href"], "https://example.com/notes")
+        self.assertEqual(text[links[0]["start"]:links[0]["end"]], "the release notes")
+
+    def test_a_bare_link_is_its_own_words(self):
+        text, links = self.flatten("<https://example.com/x>")
+        self.assertEqual(text, "https://example.com/x")
+        self.assertEqual(links[0]["href"], "https://example.com/x")
+
+    def test_a_javascript_url_is_left_as_words(self):
+        text, links = self.flatten("<javascript:alert(1)|click me>")
+        self.assertEqual(links, [])
+        self.assertEqual(text, "click me")
+
+    def test_offsets_survive_an_emoji_before_the_link(self):
+        # The emoji becomes one character where it was five, and the link's
+        # offsets have to be offsets into the finished text or the anchor
+        # lands on the wrong words.
+        text, links = self.flatten(":tada: <https://example.com|ship it>")
+        self.assertEqual(text, "\U0001F389 ship it")
+        self.assertEqual(text[links[0]["start"]:links[0]["end"]], "ship it")
+
+    def test_an_address_inside_a_link_is_not_read_as_a_shortcode(self):
+        text, links = self.flatten("<https://example.com/a:b:c|there>")
+        self.assertEqual(links[0]["href"], "https://example.com/a:b:c")
+        self.assertEqual(text, "there")
+
+    def test_slacks_three_escapes_are_decoded(self):
+        text, _ = self.flatten("a &lt; b &amp;&amp; c &gt; d")
+        self.assertEqual(text, "a < b && c > d")
+
+    def test_a_control_character_cannot_forge_a_link_span(self):
+        # The marks used to carry link positions through the substitutions are
+        # C0 controls. A message arriving with one must not be able to make a
+        # span of its own.
+        text, links = self.flatten("\x00https://evil.example\x01words\x02")
+        self.assertEqual(links, [])
+        self.assertIn("words", text)
+
+    def test_an_ampersand_in_a_query_string_survives(self):
+        _, links = self.flatten("<https://example.com/?a=1&amp;b=2|there>")
+        self.assertEqual(links[0]["href"], "https://example.com/?a=1&b=2")
+
+    def test_plain_text_is_one_line(self):
+        self.assertEqual(slack.plain_text("one\n\ntwo   three"), "one two three")
+
+
+class Emoji(unittest.TestCase):
+    def test_a_known_shortcode_becomes_its_character(self):
+        self.assertEqual(emoji.expand("ship it :rocket:"), "ship it \U0001F680")
+
+    def test_a_workspace_emoji_is_left_alone(self):
+        # There is no character for a picture somebody uploaded, and the name
+        # at least says what was meant.
+        self.assertEqual(emoji.expand("nice :blob-wave:"), "nice :blob-wave:")
+
+    def test_a_skin_tone_modifier_comes_off_its_hand(self):
+        self.assertEqual(emoji.expand(":wave::skin-tone-4:"), "\U0001F44B")
+
+    def test_the_picker_offers_characters_it_has(self):
+        rows = emoji.picker_rows()
+        self.assertTrue(all(row["emoji"] and row["name"] for row in rows))
+        self.assertEqual(rows[0]["name"], "+1")
+
+
+class Blocks(unittest.TestCase):
+    """Messages written by apps, which is half of a busy workspace."""
+
+    def test_rich_text_is_flattened_back_into_mrkdwn(self):
+        message = {"text": "", "blocks": [{
+            "type": "rich_text",
+            "elements": [{"type": "rich_text_section", "elements": [
+                {"type": "text", "text": "Build failed for "},
+                {"type": "link", "url": "https://ci.example/1", "text": "run 1"},
+                {"type": "text", "text": " "},
+                {"type": "user", "user_id": "U1"},
+            ]}],
+        }]}
+        text, links = slack.text_and_links(
+            slack.message_source(message), {"U1": {"name": "Priya"}}, {})
+        self.assertEqual(text, "Build failed for run 1 @Priya")
+        self.assertEqual(links[0]["href"], "https://ci.example/1")
+
+    def test_blocks_win_over_a_one_word_fallback(self):
+        message = {"text": "New message", "blocks": [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "The deploy to production finished in 4m12s"},
+        }]}
+        self.assertIn("4m12s", slack.message_source(message))
+
+    def test_an_attachment_is_added_when_it_says_something_new(self):
+        message = {"text": "Heads up", "attachments": [
+            {"title": "PR #41", "title_link": "https://example.com/41", "text": "Fix the race"}]}
+        source = slack.message_source(message)
+        self.assertIn("Heads up", source)
+        self.assertIn("Fix the race", source)
+        text, links = slack.text_and_links(source, {}, {})
+        self.assertEqual(links[0]["href"], "https://example.com/41")
+
+    def test_a_fallback_is_dropped_when_the_text_already_said_it(self):
+        message = {"text": "", "attachments": [
+            {"text": "the real thing", "fallback": "the real thing"}]}
+        self.assertEqual(slack.message_source(message).count("the real thing"), 1)
+
+
+class Files(unittest.TestCase):
+    def test_a_picture_is_taken_at_thumbnail_size(self):
+        images, others = slack.file_rows({"files": [{
+            "mimetype": "image/png", "name": "shot.png",
+            "url_private": "https://files.slack.com/full.png",
+            "thumb_720": "https://files.slack.com/thumb.png",
+            "thumb_720_w": 720, "thumb_720_h": 400,
+        }]})
+        self.assertEqual(others, [])
+        self.assertEqual(images[0]["url"], "https://files.slack.com/thumb.png")
+        self.assertEqual((images[0]["width"], images[0]["height"]), (720, 400))
+
+    def test_anything_else_is_a_chip_pointing_at_its_page(self):
+        images, others = slack.file_rows({"files": [{
+            "mimetype": "application/pdf", "name": "notes.pdf", "pretty_type": "PDF",
+            "size": 2048, "permalink": "https://example.slack.com/files/x",
+            "url_private": "https://files.slack.com/notes.pdf",
+        }]})
+        self.assertEqual(images, [])
+        # The permalink, not url_private: the browser is signed in to the one
+        # and gets a redirect from the other.
+        self.assertEqual(others[0]["link"], "https://example.slack.com/files/x")
+        self.assertEqual(others[0]["kind"], "PDF")
+
+    def test_a_file_this_token_may_not_read_says_so(self):
+        _, others = slack.file_rows({"files": [
+            {"mode": "tombstone", "name": "gone.png", "mimetype": "image/png"}]})
+        self.assertEqual(others[0]["kind"], "unavailable")
+
+
+class Reactions(unittest.TestCase):
+    def test_yours_is_marked_and_the_biggest_leads(self):
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "eyes", "count": 1, "users": ["U9"]},
+            {"name": "+1", "count": 3, "users": ["U1", "U2", "U9"]},
+        ]}, "U1")
+        self.assertEqual([row["name"] for row in rows], ["+1", "eyes"])
+        self.assertTrue(rows[0]["mine"])
+        self.assertFalse(rows[1]["mine"])
+        self.assertEqual(rows[0]["emoji"], "\U0001F44D")
+
+    def test_a_workspace_emoji_keeps_its_name(self):
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "shipit-squirrel", "count": 1, "users": []}]}, "U1")
+        self.assertEqual(rows[0]["emoji"], ":shipit-squirrel:")
+
+
+class Timestamps(unittest.TestCase):
+    def test_newer_compares_as_a_number_and_not_as_text(self):
+        # "999999999.000100" sorts after "1712345678.000200" as a string, which
+        # is the kind of comparison that works until it does not.
+        self.assertTrue(slack.newer("1712345678.000200", "999999999.000100"))
+        self.assertFalse(slack.newer("999999999.000100", "1712345678.000200"))
+
+    def test_an_empty_mark_means_everything_is_newer(self):
+        self.assertTrue(slack.newer("1712345678.000200", ""))
+
+    def test_a_slack_stamp_becomes_an_iso_string(self):
+        self.assertEqual(slack.iso_from_ts("1392734382.000100"), "2014-02-18T14:39:42Z")
+
+    def test_nonsense_does_not_raise(self):
+        self.assertEqual(slack.iso_from_ts("not a time"), "")
+
+
+class Scopes(unittest.TestCase):
+    """What a token may do, read from what Slack said rather than assumed."""
+
+    account = {"scopes": "channels:history,channels:read,chat:write,users:read"}
+
+    def test_a_capability_needs_one_of_its_scopes(self):
+        self.assertTrue(slack.granted(self.account, "read"))
+        self.assertTrue(slack.granted(self.account, "post"))
+        self.assertFalse(slack.granted(self.account, "search"))
+        self.assertFalse(slack.granted(self.account, "react"))
+
+    def test_unknown_means_no(self):
+        self.assertFalse(slack.granted({}, "post"))
+        self.assertFalse(slack.granted(None, "read"))
+
+    def test_a_prefix_is_not_a_scope(self):
+        # "channels:read" must not satisfy "channels:write".
+        self.assertFalse(slack.granted({"scopes": "channels:read"}, "join"))
+
+    def test_what_is_missing_is_listed_in_the_readmes_order(self):
+        missing = slack.missing_scopes(self.account)
+        self.assertIn("search:read", missing)
+        self.assertNotIn("chat:write", missing)
+        self.assertEqual(missing, [s for s in slack.WANTED_SCOPES if s in missing])
+
+
+class TokenKind(unittest.TestCase):
+    """Which of the four things Slack calls a token this actually is.
+
+    auth.test answers cheerfully for every one of them, so the sign-in cannot
+    be "did the token work" - it has to be "is this the token that can do any
+    of this", and only the scopes say.
+    """
+
+    def test_an_app_configuration_token_is_named_for_what_it_is(self):
+        problem = slack.token_problem(
+            "xoxe.xoxp-1-abc", "identify,app_configurations:read,app_configurations:write")
+        self.assertIn("App Configuration Token", problem)
+        self.assertIn("OAuth & Permissions", problem)
+
+    def test_a_rotating_token_is_refused_because_it_cannot_be_refreshed(self):
+        problem = slack.token_problem("xoxe.xoxp-1-abc", "channels:history,channels:read")
+        self.assertIn("rotation", problem)
+
+    def test_a_bot_token_is_the_wrong_half_of_the_page(self):
+        self.assertIn("User OAuth Token", slack.token_problem("xoxb-1-abc", "chat:write"))
+
+    def test_a_token_with_no_history_scopes_says_what_it_does_have(self):
+        problem = slack.token_problem("xoxp-1-abc", "chat:write,users:read")
+        self.assertIn("no history scopes", problem)
+        self.assertIn("chat:write", problem)
+
+    def test_the_right_token_is_no_problem_at_all(self):
+        self.assertEqual(slack.token_problem(
+            "xoxp-1-abc", "channels:history,channels:read,chat:write"), "")
+
+    def test_scopes_nobody_has_reported_yet_are_not_second_guessed(self):
+        # Before the first response there is nothing to judge, and refusing on
+        # no evidence would refuse every good token too.
+        self.assertEqual(slack.token_problem("xoxp-1-abc", ""), "")
+
+
+class Hosts(unittest.TestCase):
+    """Which host gets the token, which is the one that must never be wrong."""
+
+    def setUp(self):
+        self.requests = []
+
+        class Response:
+            headers = {"Content-Type": "image/png"}
+
+            def read(self, _n):
+                return b"\x89PNG fake"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            self.requests.append(request)
+            return Response()
+
+        self.original = slack.urllib.request.urlopen
+        slack.urllib.request.urlopen = fake_urlopen
+        self.cache = tempfile.mkdtemp()
+        self.original_dir = slack.MEDIA_DIR
+        slack.MEDIA_DIR = self.cache
+
+    def tearDown(self):
+        slack.urllib.request.urlopen = self.original
+        slack.MEDIA_DIR = self.original_dir
+
+    def test_an_image_from_anywhere_else_is_refused(self):
+        with self.assertRaises(slack.AccountError):
+            slack.fetch_media("https://evil.example/pixel.png", "xoxp-secret")
+        self.assertEqual(self.requests, [])
+
+    def test_http_is_refused_even_on_a_slack_host(self):
+        with self.assertRaises(slack.AccountError):
+            slack.fetch_media("http://files.slack.com/x.png", "xoxp-secret")
+        self.assertEqual(self.requests, [])
+
+    def test_the_token_goes_only_to_the_host_that_needs_it(self):
+        slack.fetch_media("https://files.slack.com/x.png", "xoxp-secret")
+        self.assertEqual(self.requests[-1].get_header("Authorization"), "Bearer xoxp-secret")
+
+        slack.fetch_media("https://avatars.slack-edge.com/y.png", "xoxp-secret")
+        # An avatar needs no token, so it is not given one - the CDN is not the
+        # API, and a token sent somewhere it is not needed is a token that can
+        # leak somewhere it was not meant to go.
+        self.assertIsNone(self.requests[-1].get_header("Authorization"))
+
+    def test_a_sign_in_page_is_not_an_image(self):
+        class HtmlResponse:
+            headers = {"Content-Type": "text/html"}
+
+            def read(self, _n):
+                return b"<html>sign in</html>"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        slack.urllib.request.urlopen = lambda request, timeout=None: HtmlResponse()
+        with self.assertRaises(slack.AccountError):
+            slack.fetch_media("https://files.slack.com/expired.png", "xoxp-secret")
+
+
+class Api(unittest.TestCase):
+    """The one place a response is turned into an answer."""
+
+    def test_calls_are_paced_rather_than_fired_all_at_once(self):
+        # A burst is what Slack answers with 429s, and whatever loses that race
+        # has no answer for the rest of the interval.
+        api = slack.Slack("x")
+        api.MIN_INTERVAL = 0.02
+        api.METHOD_INTERVAL = {}
+        started = time.monotonic()
+        for _ in range(5):
+            api._pace("conversations.info")
+        self.assertGreater(time.monotonic() - started, 0.06)
+
+    def test_one_method_does_not_wait_for_another(self):
+        # Slack counts per method, so a shared queue makes each method wait for
+        # the others' turns for nothing: seven conversations.info calls behind
+        # one global gate took seven intervals rather than one.
+        api = slack.Slack("x")
+        api.MIN_INTERVAL = 0.05
+        api.METHOD_INTERVAL = {}
+        api._pace("search.messages")
+        started = time.monotonic()
+        api._pace("conversations.info")
+        self.assertLess(time.monotonic() - started, 0.02, "a different bucket, so no wait")
+
+    def test_the_restricted_endpoint_is_paced_more_carefully_than_the_rest(self):
+        api = slack.Slack("x")
+        self.assertGreater(api.METHOD_INTERVAL["conversations.history"],
+                           api.METHOD_INTERVAL["conversations.info"])
+
+    def test_a_rate_limit_is_waited_out_once(self):
+        attempts = []
+
+        class Limited(slack.urllib.error.HTTPError):
+            def __init__(self):
+                self.code = 429
+                self.headers = {"Retry-After": "0"}
+
+            def read(self, _n=None):
+                return b""
+
+        class Fine:
+            status = 200
+            headers = {}
+
+            def read(self, _n):
+                return b'{"ok": true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def urlopen(request, timeout=None):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise Limited()
+            return Fine()
+
+        original = slack.urllib.request.urlopen
+        slack.urllib.request.urlopen = urlopen
+        try:
+            api = slack.Slack("x")
+            api.MIN_INTERVAL = 0
+            ok, _ = api.call("conversations.history")
+        finally:
+            slack.urllib.request.urlopen = original
+        self.assertTrue(ok)
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(api.rate_limited, "waited it out, so nothing to report")
+
+    def test_what_the_token_may_do_is_read_off_the_response(self):
+        class Response:
+            status = 200
+            headers = {"x-oauth-scopes": "chat:write,users:read"}
+
+            def read(self, _n):
+                return b'{"ok": true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        original = slack.urllib.request.urlopen
+        slack.urllib.request.urlopen = lambda request, timeout=None: Response()
+        try:
+            api = slack.Slack("xoxp-x")
+            ok, _ = api.call("auth.test")
+        finally:
+            slack.urllib.request.urlopen = original
+        self.assertTrue(ok)
+        self.assertEqual(api.scopes, "chat:write,users:read")
+
+    def test_slack_saying_no_is_not_an_exception(self):
+        class Response:
+            status = 200
+            headers = {}
+
+            def read(self, _n):
+                return b'{"ok": false, "error": "channel_not_found"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        original = slack.urllib.request.urlopen
+        slack.urllib.request.urlopen = lambda request, timeout=None: Response()
+        try:
+            ok, payload = slack.Slack("x").call("conversations.history")
+        finally:
+            slack.urllib.request.urlopen = original
+        self.assertFalse(ok)
+        self.assertEqual(payload["error"], "channel_not_found")
+
+    def test_a_code_becomes_a_sentence(self):
+        self.assertIn("not valid", slack.friendly("invalid_auth"))
+        self.assertIn("Slack said", slack.friendly("something_new_they_added"))
+
+
+class Conversations(unittest.TestCase):
+    def test_a_group_dm_is_named_after_the_people_in_it(self):
+        users = {"U1": {"handle": "priya", "name": "Priya Raman"},
+                 "U2": {"handle": "dana", "name": "Dana Okafor"}}
+        self.assertEqual(slack.mpim_title("mpdm-priya--dana--tomas-1", users),
+                         "Priya Raman, Dana Okafor, tomas")
+
+    def test_a_group_dm_is_not_named_after_you(self):
+        # Every group DM otherwise carries your own name in the middle of it,
+        # which is a third of the row spent saying who is reading it.
+        users = {"U1": {"handle": "priya", "name": "Priya Raman"}}
+        self.assertEqual(
+            slack.mpim_title("mpdm-priya--jan.renz--tomas-1", users, "jan.renz"),
+            "Priya Raman, tomas")
+
+    def test_a_direct_message_is_named_after_the_person(self):
+        row = slack.conversation_row({"id": "D1", "is_im": True, "user": "U1"},
+                                     {"U1": {"name": "Priya Raman"}})
+        self.assertEqual(row["title"], "Priya Raman")
+        self.assertEqual(row["kind"], "im")
+        self.assertEqual(row["withUserId"], "U1")
+
+    def test_a_channel_wears_its_hash(self):
+        row = slack.conversation_row(
+            {"id": "C1", "name": "platform", "topic": {"value": "Keeping the lights on"}}, {})
+        self.assertEqual(row["title"], "#platform")
+        self.assertEqual(row["topic"], "Keeping the lights on")
+
+    def test_what_was_actually_read_beats_slacks_own_hint(self):
+        # `updated` is not the last message: a channel can read 2024 and have
+        # had a message this morning. What this plugin saw itself wins.
+        rows = [
+            {"id": "C1", "title": "#a", "updated": 9_999_999_999_999, "priority": 0},
+            {"id": "C2", "title": "#b", "updated": 1, "priority": 0},
+        ]
+        order = slack.by_interest(rows, {"C2": "1712345678.0"})
+        self.assertEqual([row["id"] for row in order], ["C2", "C1"])
+
+    def test_slacks_hint_is_used_when_nothing_better_is_known(self):
+        rows = [
+            {"id": "C1", "title": "#a", "updated": 1, "priority": 0},
+            {"id": "C2", "title": "#b", "updated": 9_999_999_999_999, "priority": 0},
+        ]
+        self.assertEqual([row["id"] for row in slack.by_interest(rows, {})], ["C2", "C1"])
+
+    def test_the_order_is_stable_when_nothing_is_known_at_all(self):
+        rows = [{"id": "C2", "title": "#b", "updated": 0, "priority": 0},
+                {"id": "C1", "title": "#a", "updated": 0, "priority": 0}]
+        self.assertEqual([row["id"] for row in slack.by_interest(rows, {})], ["C1", "C2"])
+
+    def test_the_feed_keeps_the_newest_message_per_conversation(self):
+        # One search answers for every conversation at once, and a busy one is
+        # in it several times over.
+        matches = [
+            {"channel": {"id": "C1", "name": "platform"}, "ts": "1712345600.1", "text": "older"},
+            {"channel": {"id": "C1", "name": "platform"}, "ts": "1712345900.1", "text": "newest"},
+            {"channel": {"id": "D1", "is_im": True}, "ts": "1712345700.1", "text": "a dm"},
+        ]
+        api = FakeApi({"search.messages": (True, {"messages": {
+            "matches": matches, "paging": {"pages": 1}}})})
+        feed, stamps, problem = slack.activity_feed(api)
+        self.assertEqual(problem, "")
+        self.assertEqual(set(feed), {"C1", "D1"})
+        self.assertEqual(feed["C1"]["text"], "newest")
+        # Every stamp is kept, not just the newest: that is what an unread
+        # count is counted out of.
+        self.assertEqual(sorted(stamps["C1"]), ["1712345600.1", "1712345900.1"])
+
+    def test_the_feed_asks_for_a_window_and_the_newest_first(self):
+        api = FakeApi({"search.messages": (True, {"messages": {"matches": [], "paging": {"pages": 1}}})})
+        slack.activity_feed(api, days=4)
+        method, params = api.calls[0]
+        self.assertEqual(method, "search.messages")
+        self.assertTrue(params["query"].startswith("after:"))
+        self.assertEqual(params["sort"], "timestamp")
+        self.assertEqual(params["sort_dir"], "desc")
+
+    def test_a_refused_search_is_reported_rather_than_guessed_around(self):
+        api = FakeApi({"search.messages": (False, {"error": "missing_scope"})})
+        feed, stamps, problem = slack.activity_feed(api)
+        self.assertEqual((feed, stamps), ({}, {}))
+        self.assertEqual(problem, "missing_scope")
+
+
+class Sending(unittest.TestCase):
+    """Writes, which are the ones that must refuse rather than half-work."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.original_state = slack.STATE_DIR
+        self.original_cache = slack.CACHE_DIR
+        slack.STATE_DIR = self.state
+        slack.CACHE_DIR = os.path.join(self.state, "cache")
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1",
+            "scopes": "chat:write,reactions:write,channels:history",
+        }, private=True)
+
+    def tearDown(self):
+        slack.STATE_DIR = self.original_state
+        slack.CACHE_DIR = self.original_cache
+
+    def send_args(self, **kwargs):
+        args = Args()
+        args.channel = "C1"
+        args.thread = ""
+        args.broadcast = False
+        args.text = "hello"
+        args.stdin = False
+        args.demo = False
+        for key, value in kwargs.items():
+            setattr(args, key, value)
+        return args
+
+    def test_the_three_characters_slack_escapes_are_escaped(self):
+        sent = {}
+
+        class Recorder(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                sent["method"] = method
+                sent["params"] = params
+                return True, {"ts": "1.1"}
+
+        original = slack.Slack
+        slack.Slack = Recorder
+        try:
+            payload = capture(slack.cmd_send, self.send_args(text="a < b & c > d"))
+        finally:
+            slack.Slack = original
+        self.assertTrue(payload["ok"])
+        self.assertEqual(sent["params"]["text"], "a &lt; b &amp; c &gt; d")
+
+    def test_a_thread_reply_says_which_thread(self):
+        sent = {}
+
+        class Recorder(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                sent.update(params or {})
+                return True, {"ts": "1.1"}
+
+        original = slack.Slack
+        slack.Slack = Recorder
+        try:
+            capture(slack.cmd_send, self.send_args(thread="99.1", broadcast=True))
+        finally:
+            slack.Slack = original
+        self.assertEqual(sent["thread_ts"], "99.1")
+        self.assertEqual(sent["reply_broadcast"], "true")
+
+    def test_nothing_is_sent_when_there_is_nothing_to_send(self):
+        payload = capture(slack.cmd_send, self.send_args(text="   "))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "empty")
+
+    def test_a_token_without_chat_write_refuses_before_the_request(self):
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "scopes": "channels:history"}, private=True)
+
+        class Explode(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                raise AssertionError("should not have asked Slack")
+
+        original = slack.Slack
+        slack.Slack = Explode
+        try:
+            payload = capture(slack.cmd_send, self.send_args())
+        finally:
+            slack.Slack = original
+        self.assertEqual(payload["error"]["code"], "permission_required")
+        self.assertIn("chat:write", payload["error"]["message"])
+
+    def test_reacting_twice_is_not_an_error_worth_showing(self):
+        class Recorder(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                return False, {"error": "already_reacted"}
+
+        args = Args()
+        args.channel, args.ts, args.emoji, args.remove = "C1", "1.1", "tada", False
+        original = slack.Slack
+        slack.Slack = Recorder
+        try:
+            payload = capture(slack.cmd_react, args)
+        finally:
+            slack.Slack = original
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["noop"])
+
+    def test_marking_read_without_the_scope_still_remembers_it_here(self):
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "scopes": "channels:history"}, private=True)
+        args = Args()
+        args.channel, args.ts, args.demo = "C1", "1712345678.1", False
+        payload = capture(slack.cmd_mark_read, args)
+        self.assertFalse(payload["ok"])
+        marks, _ = slack.load_marks("work")
+        # Slack was not told, but this window will stop claiming the message is
+        # waiting for somebody who has just read it.
+        self.assertEqual(marks["C1"], "1712345678.1")
+
+    def test_a_token_that_is_not_a_token_is_refused_before_the_network(self):
+        original_stdin = sys.stdin
+        sys.stdin = type("S", (), {"readline": staticmethod(lambda: '{"token": "hunter2"}\n')})()
+        try:
+            args = Args()
+            payload = capture(slack.cmd_login_set, args)
+        finally:
+            sys.stdin = original_stdin
+        self.assertEqual(payload["error"]["code"], "bad_token")
+
+
+class Manifest(unittest.TestCase):
+    """The app this plugin asks Slack to make."""
+
+    def test_the_manifest_asks_for_exactly_what_the_code_checks_for(self):
+        # Two lists would drift, and the drift is silent: the window would say
+        # a feature needs a scope the app it told you to create already has.
+        manifest = slack.app_manifest()
+        self.assertEqual(manifest["oauth_config"]["scopes"]["user"], slack.WANTED_SCOPES)
+
+    def test_every_capability_is_covered_by_a_scope_it_asks_for(self):
+        asked = set(slack.WANTED_SCOPES)
+        for capability, scopes in slack.CAPABILITIES.items():
+            self.assertTrue(asked & set(scopes), "%s is unreachable" % capability)
+
+    def test_rotation_is_off_because_it_could_not_be_honoured(self):
+        self.assertFalse(slack.app_manifest()["settings"]["token_rotation_enabled"])
+
+    def test_only_a_configuration_token_may_create_an_app(self):
+        original_stdin = sys.stdin
+        sys.stdin = type("S", (), {"readline": staticmethod(lambda: '{"token": "xoxp-1-user"}\n')})()
+        try:
+            args = Args()
+            args.name, args.dry_run = "", True
+            payload = capture(slack.cmd_create_app, args)
+        finally:
+            sys.stdin = original_stdin
+        self.assertEqual(payload["error"]["code"], "wrong_token")
+
+
+class Caches(unittest.TestCase):
+    """What is not asked again, and when it is asked anyway."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original_state, self.original_cache = slack.STATE_DIR, slack.CACHE_DIR
+        slack.STATE_DIR = self.dir
+        slack.CACHE_DIR = os.path.join(self.dir, "cache")
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1",
+            "scopes": ",".join(slack.WANTED_SCOPES)}, private=True)
+
+    def tearDown(self):
+        slack.STATE_DIR, slack.CACHE_DIR = self.original_state, self.original_cache
+
+    @staticmethod
+    def _lists():
+        """Channels on one call, direct messages on the other, as Slack does."""
+        def by_type(params):
+            if "public_channel" in (params or {}).get("types", ""):
+                return True, {"channels": [{"id": "C1", "name": "a"}]}
+            return True, {"channels": [{"id": "D1", "is_im": True}]}
+        return {"users.conversations": by_type}
+
+    def test_the_conversation_list_is_read_once_and_then_believed(self):
+        api = FakeApi(self._lists())
+        first, _ = slack.conversation_lists(api, "work")
+        second, _ = slack.conversation_lists(api, "work")
+        self.assertEqual([row["id"] for row in first], ["C1", "D1"])
+        self.assertEqual(first, second)
+        self.assertEqual(len(api.calls), 2, "two paged calls the first time, none the second")
+
+    def test_asking_for_it_fresh_asks_slack_again(self):
+        api = FakeApi(self._lists())
+        slack.conversation_lists(api, "work")
+        slack.conversation_lists(api, "work", fresh=True)
+        self.assertEqual(len(api.calls), 4)
+
+    def test_a_refusal_does_not_empty_a_list_that_was_working(self):
+        good = FakeApi(self._lists())
+        slack.conversation_lists(good, "work")
+        broken = FakeApi({"users.conversations": (False, {"error": "ratelimited"})})
+        # Expire it, so the refusal is what the fresh read runs into.
+        rows, problem = slack.conversation_lists(broken, "work", fresh=True)
+        self.assertEqual([row["id"] for row in rows], ["C1", "D1"])
+        self.assertEqual(problem, "ratelimited")
+
+    def test_a_recent_snapshot_is_handed_back_without_asking_slack(self):
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"snapshot": {"ok": True, "accounts": [{"alias": "work", "ok": True}]},
+                          "at": time.time()})
+
+        class Explode(slack.Slack):
+            def call(self, *a, **k):
+                raise AssertionError("a cached snapshot must cost nothing")
+
+        args = Args()
+        args.account, args.demo, args.max_age = ["work"], False, 120
+        args.conversations, args.sort = 40, "recent"
+        args.avatars = args.presence = args.fresh = False
+        original = slack.Slack
+        slack.Slack = Explode
+        try:
+            payload = capture(slack.cmd_fetch, args)
+        finally:
+            slack.Slack = original
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["accounts"][0]["alias"], "work")
+
+    def test_a_snapshot_older_than_asked_for_is_not_used(self):
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"snapshot": {"ok": True, "accounts": []}, "at": time.time() - 600})
+        asked = []
+
+        class Counting(slack.Slack):
+            def call(self, method, params=None, timeout=20, retries=1):
+                asked.append(method)
+                return False, {"error": "invalid_auth"}
+
+        args = Args()
+        args.account, args.demo, args.max_age = ["work"], False, 120
+        args.conversations, args.sort = 40, "recent"
+        args.avatars = args.presence = args.fresh = False
+        original = slack.Slack
+        slack.Slack = Counting
+        try:
+            payload = capture(slack.cmd_fetch, args)
+        finally:
+            slack.Slack = original
+        self.assertNotIn("cached", payload)
+        self.assertTrue(asked, "it went and asked")
+
+    def test_presence_is_kept_for_a_minute_and_then_asked_again(self):
+        asked = []
+
+        class Counting(slack.Slack):
+            def call(self, method, params=None, timeout=20, retries=1):
+                asked.append((params or {}).get("user"))
+                return True, {"presence": "active"}
+
+        args = Args()
+        args.user, args.demo = ["U1", "U2", "U1"], False
+        original = slack.Slack
+        slack.Slack = Counting
+        try:
+            first = capture(slack.cmd_presence, args)
+            second = capture(slack.cmd_presence, args)
+        finally:
+            slack.Slack = original
+        self.assertEqual(first["presence"]["U1"]["state"], "active")
+        self.assertEqual(second["presence"]["U2"]["state"], "active")
+        # Two people, asked about once between them: the repeat in the list is
+        # not a second request, and neither is the second call a minute later.
+        self.assertEqual(sorted(asked), ["U1", "U2"])
+
+
+class Demo(unittest.TestCase):
+    """The fixtures, which every screenshot and every layout change is built on."""
+
+    def test_a_demo_fetch_answers_without_a_token(self):
+        args = Args()
+        args.account = ["demo"]
+        args.demo = True
+        args.conversations = 25
+        args.sort = "recent"
+        args.avatars = True
+        args.presence = True
+        payload = capture(slack.cmd_fetch, args)
+        account = payload["accounts"][0]
+        self.assertTrue(account["ok"])
+        self.assertTrue(account["dms"] and account["channels"])
+        self.assertTrue(account["unreadCount"] > 0)
+
+    def test_a_demo_write_writes_nothing(self):
+        args = Args()
+        args.demo = True
+        args.channel, args.ts, args.emoji, args.remove = "C1", "1.1", "tada", False
+
+        class Explode(slack.Slack):
+            def call(self, *a, **k):
+                raise AssertionError("demo mode reached the network")
+
+        original = slack.Slack
+        slack.Slack = Explode
+        try:
+            self.assertTrue(capture(slack.cmd_react, args)["ok"])
+        finally:
+            slack.Slack = original
+
+    def test_the_demo_transcript_goes_through_the_real_reader(self):
+        payload = slack.demo_messages("demo-channel-0")
+        with_link = [m for m in payload["messages"] if m["links"]]
+        self.assertTrue(with_link)
+        self.assertEqual(with_link[0]["links"][0]["href"], "https://example.com/releases/14-02")
+        # And the emoji in it is a character by the time it leaves here.
+        self.assertTrue(any("\U0001F64F" in m["text"] for m in payload["messages"]))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

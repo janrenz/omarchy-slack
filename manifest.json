@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "id": "janrenz.omarchy.slack",
+  "name": "Slack",
+  "version": "0.1.0",
+  "author": "Jan Renz",
+  "license": "MIT",
+  "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Needs python3 (standard library only) and a Slack app of yours - see the README. Talks to the Slack Web API and nothing else.",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "entryPoints": {
+    "barWidget": "src/BarWidget.qml",
+    "panel": "src/SlackWindow.qml"
+  },
+  "barWidget": {
+    "displayName": "Slack",
+    "description": "Unread conversations in the bar; the channels and DMs open in their own window.",
+    "category": "Communication",
+    "aliases": [
+      "slack",
+      "chat",
+      "channels",
+      "dm",
+      "messages",
+      "threads"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "icon": "󰒱",
+      "label": "",
+      "conversations": 40,
+      "sort": "recent",
+      "refreshIntervalSec": 120,
+      "tintOnUnread": true,
+      "showCount": false,
+      "avatars": true,
+      "presence": true,
+      "notify": true,
+      "density": "cosy"
+    },
+    "schema": [
+      {
+        "key": "account",
+        "type": "string",
+        "label": "Workspace name",
+        "description": "A short name for this sign-in, e.g. work. Letters, numbers, dot, dash and underscore. It names the token file, not the Slack workspace."
+      },
+      {
+        "key": "conversations",
+        "type": "integer",
+        "label": "Read-state checks per poll",
+        "description": "How many conversations may be asked 'how much of this have I read' in one poll. The previews themselves cost one search for the whole workspace, so this is only about the unread marks.",
+        "min": 5,
+        "max": 120,
+        "step": 5,
+        "defaultValue": 40
+      },
+      {
+        "key": "sort",
+        "type": "string",
+        "label": "Order the sidebar by",
+        "description": "recent puts whatever spoke last at the top of each section; name is Slack's own alphabetical order.",
+        "defaultValue": "recent",
+        "options": [
+          "recent",
+          "name"
+        ]
+      },
+      {
+        "key": "density",
+        "type": "string",
+        "label": "Spacing",
+        "description": "How much room the window gives things. Scales the theme's own spacing, so it follows your font size rather than fighting it.",
+        "defaultValue": "cosy",
+        "options": [
+          "compact",
+          "cosy",
+          "roomy",
+          "spacious"
+        ]
+      },
+      {
+        "key": "avatars",
+        "type": "boolean",
+        "label": "Show avatars",
+        "description": "Pictures are fetched by the helper, cached on disk, and never fetched by the window itself.",
+        "defaultValue": true
+      },
+      {
+        "key": "presence",
+        "type": "boolean",
+        "label": "Show who is around",
+        "description": "A dot beside each DM. Needs the users:read scope; costs one request per person in view.",
+        "defaultValue": true
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 120
+      },
+      {
+        "key": "icon",
+        "type": "string",
+        "label": "Bar icon",
+        "description": "Nerd Font glyph shown in the bar. Ignored when a label is set.",
+        "defaultValue": "󰒱"
+      },
+      {
+        "key": "label",
+        "type": "string",
+        "label": "Bar label",
+        "description": "Short text shown instead of the icon, e.g. SLACK."
+      },
+      {
+        "key": "tintOnUnread",
+        "type": "boolean",
+        "label": "Highlight the bar icon when something is unread",
+        "defaultValue": true
+      },
+      {
+        "key": "showCount",
+        "type": "boolean",
+        "label": "Show the unread count in the bar",
+        "description": "The number of conversations with something waiting, beside the icon.",
+        "defaultValue": false
+      },
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "Notify when a message arrives",
+        "description": "A desktop notification for each conversation that has something new in it. What was already waiting when the shell started is not announced, and neither is anything you sent yourself.",
+        "defaultValue": true
+      }
+    ]
+  }
+}
