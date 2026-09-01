@@ -76,6 +76,18 @@ dev/shot.sh /tmp/slack.png [demo-im-0]      # photograph what it is drawing
 dev/showcase.sh                             # regenerate the README images
 ```
 
+A syntax check across the whole repo, which is worth having before a commit and
+is not on `$PATH`:
+
+```bash
+/usr/lib/qt6/bin/qmlformat src/*.qml >/dev/null   # silence means they all parse
+```
+
+A bare `qmlformat` is "command not found", and inside a loop with `|| echo FAIL`
+that reads as every file being broken - which is a confusing way to learn that
+nothing is wrong. It catches what a running shell does not: a file that parses
+but is never imported by the harness.
+
 `dev/link.sh` assembles a Quickshell config folder in `$XDG_RUNTIME_DIR/omarchy-slack-dev`
 and symlinks the sources into it. It has to: Quickshell only imports modules
 from inside its own config folder, so `Commons/` and `Ui/` from
