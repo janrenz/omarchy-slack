@@ -34,6 +34,7 @@
       "conversations": 40,
       "sort": "recent",
       "refreshIntervalSec": 120,
+      "pausePolling": true,
       "tintOnUnread": true,
       "showCount": false,
       "avatars": true,
@@ -104,6 +105,13 @@
         "max": 3600,
         "step": 30,
         "defaultValue": 120
+      },
+      {
+        "key": "pausePolling",
+        "type": "boolean",
+        "label": "Stop polling while you are away",
+        "description": "Slack's rate limits are a budget: a poll costs a search whether or not anybody is at the machine. Nothing is asked of the server while the screen has been idle for five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out either way. On battery the interval is doubled, and tripled in the power-saver profile.",
+        "defaultValue": true
       },
       {
         "key": "icon",

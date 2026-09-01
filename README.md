@@ -252,6 +252,7 @@ is the line that writes it into the registry — so the plugin brings its own.
 | `avatars` | `true` | Faces, fetched by the helper and cached on disk. |
 | `presence` | `true` | A dot on each DM saying whether they are around. One request per person in view. |
 | `refreshIntervalSec` | `120` | How often to poll (30–3600). |
+| `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
 | `icon` / `label` | `󰓭` | Bar glyph, or text instead of it. |
 | `tintOnUnread` | `true` | Highlight the bar icon while something is unread. |
 | `showCount` | `false` | The number of waiting conversations, beside the icon. |
@@ -273,6 +274,27 @@ is announced either.
 They are raised from behind the bar icon, not from the window, so they arrive
 whether or not the window is open — and only once, though both have a service
 of their own polling the same workspace.
+
+Clicking the notification opens that conversation on that message. Several
+messages in one conversation update one notification rather than stacking three,
+and the click still works after the shell has been restarted underneath it — the
+action travels as data on the notification rather than as a callback into the
+process that sent it.
+
+## When it does not poll
+
+Slack's rate limits are the design constraint everywhere else in this plugin,
+and they are the reason for this too: a poll costs a search whether or not
+anybody is at the machine. Nothing is asked of Slack while the screen has been
+idle for five minutes, or while the machine has no network at all, and a fetch
+goes out the moment you come back or reconnect rather than at the next tick.
+Idle inhibitors count as being present, so a full-screen call does not look like
+an empty desk. On battery the interval is doubled, and tripled in the
+power-saver profile.
+
+Anything you ask for by hand still goes out, offline included: a failure you can
+see beats a silence you cannot. The bar's tooltip says why nothing is moving
+while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
 
 ## How it knows what is new, and why it is built the way it is
 

@@ -70,6 +70,9 @@ BarWidget {
                                      : service.unreadCount + " conversations waiting"))
       var coverage = Model.coverageLabel(service.view)
       if (coverage !== "") lines.push(coverage)
+      // A bar that is not moving because nobody is at the machine looks exactly
+      // like a bar that is broken. Say which.
+      if (service.pollReason !== "") lines.push(service.pollReason)
       for (var i = 0; i < service.warnings.length; i++)
         lines.push(Model.plainText(service.warnings[i].message))
       return lines.join("\n")

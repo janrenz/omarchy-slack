@@ -22,7 +22,9 @@ src/Service.qml        Owns the Processes that run slack.py, the poll timer,
                        and the state the UI binds to.
 src/BarWidget.qml      The bar icon. Opens the window; there is no dropdown.
 src/SlackWindow.qml    The window. Sidebar, transcript, message box. ~2k lines.
-src/Notifier.qml       notify-send, with the prime-then-announce rule.
+src/Notifier.qml       omarchy-notification-send, the prime-then-announce rule,
+                       and the click that opens the conversation.
+src/PollGate.qml       Whether it is worth polling at all: idle, network, battery.
 src/SettingsForm.qml   The settings UI shown inside the shell's settings panel.
 src/QuickSwitcher.qml  `n` / `Ctrl-k`. src/SearchPane.qml is Slack search.
 src/ImageViewer.qml    A picture from the transcript, with save-as.
@@ -80,6 +82,20 @@ from inside its own config folder, so `Commons/` and `Ui/` from
 `/usr/share/omarchy/shell/` must sit beside a `shell.qml` — and the repo itself
 may not contain symlinks (invariant 7). Editing a link edits the real file.
 
+**Those links point back into the repo, so writing to the stage writes to the
+repo.** A scratch harness saved as `$STAGE/shell.qml` goes straight through the
+symlink and overwrites `dev/shell.qml`. Give a throwaway one any other name.
+
+`qs -p $STAGE/shell.qml ipc call dev state` prints what the service thinks is
+going on, which is the first thing to ask when the window comes up empty.
+
+The harness applies its fixture settings from `onSettingsLoadedChanged`, through
+a `Qt.callLater`, and both halves of that matter. The window sets
+`settingsLoaded` *before* it assigns the settings it just read from the bar
+layout, so fixtures applied inline are overwritten one line later — and the
+600ms timer this used to be won that race only *most* of the time, which is how
+a harness ends up quietly showing your real workspace instead of the fixtures.
+
 `--demo` runs through the whole plugin: every read is answered from fixtures in
 `slack.py`, every write returns as if it had happened and posts nothing. That is
 what makes an automated run safe.
@@ -92,6 +108,22 @@ fatal QML error makes it exit instead.
 
 ## Things that will surprise you
 
+- **A toast is a route back in, and it survives a shell restart.** Notifications
+  go out through `omarchy-notification-send`, whose `--exec` becomes the
+  `omarchy-exec-argv` hint: the click action rides as *data*, so omarchy can
+  still run it after the shell that sent it has been restarted, which a live
+  libnotify action cannot. Clicking runs `omarchy-shell shell summon <id>
+  '<json>'` and the payload lands in the window's `open()`. Two traps: that
+  sender has no `--` to end its options, so a headline that is exactly one of
+  its flags is guarded with a leading space in `asText()`; and `-r` needs the id
+  a previous send printed with `-p`, which is what makes several messages in one
+  conversation update one toast instead of stacking.
+- **The poll gate's signals arrive late.** For the first second or two of a
+  shell's life UPower has no devices, NetworkManager reports `Unknown`
+  connectivity and `canCheckConnectivity` is false - measured, on this machine.
+  Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
+  closed would swallow the first fetch after every shell start, which is the one
+  that fills an empty panel.
 - **`Service.qml` is instantiated more than once.** `BarWidget.qml` has one and
   `SlackWindow.qml` has another, and the bar is one surface *per monitor* — so a
   two-monitor desktop with the window open polls the workspace three times an
@@ -104,9 +136,17 @@ fatal QML error makes it exit instead.
   Read the "How it knows what is new" section of the README before adding any
   per-conversation request.
 - **Lists are `Repeater`s inside `ScrollView`s**, including the transcript. Every
-  row is instantiated. `ListView` with `reuseItems` is the fix if a long
-  conversation gets slow — the mail plugin's `MailList.qml` carries a comment on
-  exactly this trade-off.
+  row is instantiated, and every row is rebuilt whenever the array is replaced.
+  That second half is measured, not assumed: a `ListView` over a plain JS array
+  recreates *all* of its delegates when the array changes, so `reuseItems` on its
+  own buys nothing. Making a long conversation cheap needs a model that diffs,
+  and there are two, neither free. `Quickshell.ScriptModel` (`values` plus
+  `objectProp: "id"`) diffs for you but exposes only `modelData` — every
+  `required property string foo` in the delegate becomes `modelData.foo`, and a
+  delegate that outlives its row during a remove transition then reads through a
+  null, so the last non-null row has to be kept. Or the mail plugin's way: a
+  `ListModel` with the diff written by hand (`MailList.qml`), which keeps the
+  role-named delegate properties. Mail chose the second deliberately.
 - **The window is a `FloatingWindow`** — a real Hyprland toplevel, tiled like
   anything else. It has no app id of its own, so its `title` is the only handle
   a Hyprland window rule has on it.

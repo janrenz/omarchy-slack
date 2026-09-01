@@ -20,25 +20,38 @@ ShellRoot {
 
     Component.onCompleted: panel.open("{}")
 
-    // The window reads its settings out of the bar layout, and in a harness
-    // there is no bar. That read is asynchronous, so this waits for it to land
-    // and then puts fixture settings in its place - otherwise the window would
-    // be showing "no Slack widget in the bar", which is true and not useful.
+    // The window reads its settings out of the bar layout, which in a harness
+    // is the wrong answer twice over: with no Slack widget in the bar it shows
+    // "no Slack widget in the bar", and *with* one it shows your real
+    // workspace. So the fixtures are applied once that read has landed.
+    function fixtures() {
+      panel.settingsError = ""
+      panel.settings = {
+        account: "demo",
+        demo: true,
+        demoOpen: dev.openConversation,
+        density: dev.density,
+        conversations: 25,
+        avatars: true,
+        presence: true
+      }
+    }
+
+    // Deferred, and that is the whole trick: the window sets settingsLoaded
+    // *before* it assigns the settings it just read, so a handler that applies
+    // fixtures inline is overwritten by the real bar entry one line later. Ask
+    // again after that function has finished and the fixtures are what stand.
+    // This used to be a 600ms timer, which won the race against config.py
+    // nearly every time - and "nearly" is how a harness ends up quietly
+    // showing your real workspace, which is worse than showing nothing.
+    onSettingsLoadedChanged: if (panel.settingsLoaded) Qt.callLater(panel.fixtures)
+
+    // If that read never returns - no config.py, no python - the fixtures still
+    // have to arrive, or the harness shows an empty window and says nothing.
     Timer {
       running: true
-      interval: 600
-      onTriggered: {
-        panel.settingsError = ""
-        panel.settings = {
-          account: "demo",
-          demo: true,
-          demoOpen: dev.openConversation,
-          density: dev.density,
-          conversations: 25,
-          avatars: true,
-          presence: true
-        }
-      }
+      interval: 1500
+      onTriggered: if (!panel.settingsLoaded) panel.fixtures()
     }
   }
 

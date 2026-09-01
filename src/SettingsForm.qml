@@ -274,6 +274,14 @@ Column {
       root.change("refreshIntervalSec", value)
   }
 
+  Toggle {
+    width: parent.width
+    label: "Stop polling while you are away"
+    description: "A poll costs a search against Slack's rate limit whether or not anybody is at the machine. Nothing is asked of the server while the screen has been idle five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out. On battery the interval is doubled, and tripled in the power-saver profile."
+    checked: root.current("pausePolling", true) !== false
+    onClicked: root.change("pausePolling", !(root.current("pausePolling", true) !== false))
+  }
+
   PanelSeparator { width: parent.width }
 
   // ---------------- the bar ----------------

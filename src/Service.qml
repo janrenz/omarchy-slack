@@ -188,10 +188,31 @@ Item {
     }
   }
 
+  // ---- when it is worth asking at all -------------------------------------
+  //
+  // See PollGate.qml. It gates the timer only: a refresh anybody asked for by
+  // hand still goes out, because a failure the user can see beats a silence
+  // they cannot.
+  // A poll costs a search against Slack's budget whether or not anybody is here.
+  readonly property bool pausePolling: setting("pausePolling", true) !== false
+
+  PollGate {
+    id: poll
+    pauseWhenAway: root.pausePolling
+    pauseWhenOffline: root.pausePolling
+    slowOnBattery: root.pausePolling
+  }
+
+  // For a host that wants to explain a sidebar that is not moving.
+  readonly property string pollReason: poll.reason
+
+  // triggeredOnStart is what makes waking up and coming back online immediate:
+  // the gate opening restarts this timer, and a restarted timer fires at once
+  // rather than an interval later.
   Timer {
-    interval: root.refreshIntervalSec * 1000
+    interval: root.refreshIntervalSec * 1000 * poll.intervalScale
     repeat: true
-    running: root.configured
+    running: root.configured && !poll.paused
     triggeredOnStart: true
     // Deferred for the same reason the handlers above are: this fires the
     // moment `configured` flips, which is the moment the settings are still
@@ -212,10 +233,35 @@ Item {
 
   // ---- telling you something arrived -------------------------------------
 
+  // The argv omarchy's notification service runs when a toast is clicked. It
+  // goes through the shell rather than the window, because the click may
+  // arrive when no window is loaded - summon() mounts it and hands the payload
+  // to open(), and delivers it straight away when it is already up.
+  readonly property string pluginId: "janrenz.omarchy.slack"
+
+  function summonArgv(payloadJson) {
+    return ["omarchy-shell", "shell", "summon", pluginId, String(payloadJson || "{}")]
+  }
+
+  // JSON.stringify rather than a hand-built string: a conversation id comes
+  // from the server, and quoting it is not ours to guess at.
+  function openConversationArgv(id, ts) {
+    return summonArgv(JSON.stringify({
+      conversation: String(id || ""),
+      message: String(ts || "")
+    }))
+  }
+
   Notifier {
     id: notifier
     appName: "Slack"
     plural: "new messages"
+    // The same glyph the bar widget defaults to, so the toast is recognisably
+    // this plugin's at a glance.
+    glyph: "󰒱"
+    // Clicking a digest opens the window on whatever it was showing: a digest
+    // is about several conversations, so there is no one to open.
+    defaultExec: root.summonArgv("{}")
     // Not while the demo fixtures are on: dev/showcase.sh turns them on to
     // take the README's pictures, and a screenshot run should not push six
     // notifications about invented people onto a real desktop.
@@ -252,7 +298,15 @@ Item {
         summary: title,
         // A direct message is titled with the person's name, so repeating it
         // in front of every line only takes room from what they said.
-        body: (from !== "" && from !== title ? from + ": " : "") + String(row.lastText || "")
+        body: (from !== "" && from !== title ? from + ": " : "") + String(row.lastText || ""),
+        // Clicking it opens that conversation on that message.
+        exec: root.openConversationArgv(row.id, row.ts),
+        // Three messages in one conversation are one conversation with
+        // something to say, so the newest updates the toast the last one left
+        // rather than stacking a third under it. Keyed by conversation, which
+        // is exactly what the announced id is not: that one carries the ts, so
+        // that a *new* message counts as news.
+        replaceKey: String(row.id || "")
       })
     }
     notifier.observe("", fresh, present)
@@ -449,10 +503,45 @@ Item {
         root.markOnLoad = false
         root.markRead(root.newestKnownTs())
       }
+      // Reading a thread is reading it. Slack has no method for a thread's read
+      // mark, so this is remembered on this machine - see threadRead below.
+      if (root.threadTs !== "" && root.messages.length > 0) root.threadRead()
     }
   }
 
   // ---- marking read ------------------------------------------------------
+
+  // A thread the reader has now seen.
+  //
+  // `conversations.mark` is the channel's mark and Slack offers nothing for a
+  // thread, so the chip in the channel would go on saying "new" about a thread
+  // that was read right here - and it is this window's job to be where the
+  // reading happens. slack.py keeps the mark on this machine and only ever
+  // uses it to take a mark off, never to invent one.
+  function threadRead() {
+    if (!openConversation || threadTs === "" || pluginDir === "" || demo) return
+    if (threadReadProc.running) return
+    var newest = threadTs
+    for (var i = 0; i < messages.length; i++) {
+      var ts = String(messages[i].ts || "")
+      if (ts !== "" && Number(ts) > Number(newest)) newest = ts
+    }
+    threadReadProc.command = ["python3", helper(), "thread-read", "--account", alias,
+                              "--channel", String(openConversation.id),
+                              "--ts", String(threadTs), "--upto", newest]
+    threadReadProc.running = true
+  }
+
+  Process {
+    id: threadReadProc
+    running: false
+    // Local bookkeeping: there is nothing for the window to say if it fails,
+    // and nothing it could offer to do about it. The chip simply keeps its
+    // mark, which is what it did before any of this existed.
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+  }
+
 
   property string markReadError: ""
 
