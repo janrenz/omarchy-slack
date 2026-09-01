@@ -764,6 +764,182 @@ class Sending(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "bad_token")
 
 
+class Uploads(unittest.TestCase):
+    """Sending a file, which is the one request that puts our data somewhere."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.original_state = slack.STATE_DIR
+        slack.STATE_DIR = self.state
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1",
+            "scopes": "files:write,chat:write",
+        }, private=True)
+        self.file = os.path.join(self.state, "note.txt")
+        with open(self.file, "w") as handle:
+            handle.write("hello")
+
+    def tearDown(self):
+        slack.STATE_DIR = self.original_state
+
+    def upload_args(self, **kwargs):
+        args = Args()
+        args.channel = "C1"
+        args.thread = ""
+        args.file = self.file
+        args.comment = ""
+        args.title = ""
+        args.stdin = False
+        args.demo = False
+        for key, value in kwargs.items():
+            setattr(args, key, value)
+        return args
+
+    def recorder(self, answers):
+        sent = {"calls": []}
+
+        class Recorder(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                sent["calls"].append((method, params or {}))
+                return answers.get(method, (True, {}))
+
+        return sent, Recorder
+
+    def run_upload(self, args, answers, posted=(True, "")):
+        sent, Recorder = self.recorder(answers)
+        original_api, original_post = slack.Slack, slack.post_upload
+
+        def fake_post(url, filename, body, timeout=120):
+            sent["posted"] = {"url": url, "filename": filename, "bytes": len(body)}
+            return posted
+
+        slack.Slack, slack.post_upload = Recorder, fake_post
+        try:
+            return capture(slack.cmd_upload, args), sent
+        finally:
+            slack.Slack, slack.post_upload = original_api, original_post
+
+    ANSWERS = {
+        "files.getUploadURLExternal": (True, {
+            "file_id": "F1", "upload_url": "https://files.slack.com/upload/v1/abc"}),
+        "files.completeUploadExternal": (True, {"files": [{"permalink": "https://x/y"}]}),
+    }
+
+    def test_the_three_steps_happen_in_order_and_the_file_lands_in_the_channel(self):
+        payload, sent = self.run_upload(self.upload_args(), self.ANSWERS)
+        self.assertTrue(payload["ok"])
+        self.assertEqual([call[0] for call in sent["calls"]],
+                         ["files.getUploadURLExternal", "files.completeUploadExternal"])
+        reserve = sent["calls"][0][1]
+        self.assertEqual(reserve["filename"], "note.txt")
+        self.assertEqual(reserve["length"], "5")
+        self.assertEqual(sent["posted"]["bytes"], 5)
+        complete = sent["calls"][1][1]
+        self.assertEqual(complete["channel_id"], "C1")
+        self.assertEqual(json.loads(complete["files"]), [{"id": "F1", "title": "note.txt"}])
+
+    def test_a_thread_upload_says_which_thread(self):
+        _, sent = self.run_upload(self.upload_args(thread="99.1"), self.ANSWERS)
+        self.assertEqual(sent["calls"][1][1]["thread_ts"], "99.1")
+
+    def test_a_comment_is_escaped_the_way_a_message_is(self):
+        _, sent = self.run_upload(self.upload_args(comment="a < b & c"), self.ANSWERS)
+        self.assertEqual(sent["calls"][1][1]["initial_comment"], "a &lt; b &amp; c")
+
+    def test_a_file_that_reached_slack_but_no_conversation_says_exactly_that(self):
+        answers = dict(self.ANSWERS)
+        answers["files.completeUploadExternal"] = (False, {"error": "channel_not_found"})
+        payload, _ = self.run_upload(self.upload_args(), answers)
+        self.assertEqual(payload["error"]["code"], "upload_incomplete")
+
+    def test_a_missing_scope_refuses_before_anything_is_sent(self):
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "scopes": "chat:write"}, private=True)
+        payload, sent = self.run_upload(self.upload_args(), self.ANSWERS)
+        self.assertEqual(payload["error"]["code"], "permission_required")
+        self.assertEqual(sent["calls"], [])
+        self.assertNotIn("posted", sent)
+
+    def test_a_directory_is_not_a_file_to_send(self):
+        payload = capture(slack.cmd_upload, self.upload_args(file=self.state, demo=True))
+        self.assertEqual(payload["error"]["code"], "no_file")
+
+    def test_an_empty_file_is_refused(self):
+        empty = os.path.join(self.state, "empty.bin")
+        open(empty, "wb").close()
+        payload = capture(slack.cmd_upload, self.upload_args(file=empty, demo=True))
+        self.assertEqual(payload["error"]["code"], "empty_file")
+
+    def test_something_larger_than_the_cap_is_refused_by_size_not_by_reading_it(self):
+        big = os.path.join(self.state, "big.bin")
+        with open(big, "wb") as handle:
+            handle.truncate(slack.UPLOAD_CAP + 1)
+        payload = capture(slack.cmd_upload, self.upload_args(file=big, demo=True))
+        self.assertEqual(payload["error"]["code"], "too_large")
+
+    def test_a_demo_upload_sends_nothing(self):
+        sent, Recorder = self.recorder(self.ANSWERS)
+        original = slack.Slack
+        slack.Slack = Recorder
+        try:
+            payload = capture(slack.cmd_upload, self.upload_args(demo=True))
+        finally:
+            slack.Slack = original
+        self.assertTrue(payload["ok"])
+        self.assertEqual(sent["calls"], [])
+
+    def test_the_bytes_go_nowhere_but_slack(self):
+        # The URL is named by an API response rather than by a message, but it
+        # is still somebody else naming where our file goes.
+        for url in ("https://evil.example/upload",
+                    "http://files.slack.com/upload/v1/abc",
+                    "https://files.slack.com.evil.example/x"):
+            with self.assertRaises(Emitted) as caught:
+                original = slack.out
+                slack.out = lambda payload: (_ for _ in ()).throw(Emitted(payload))
+                try:
+                    slack.post_upload(url, "note.txt", b"hello")
+                finally:
+                    slack.out = original
+            self.assertEqual(caught.exception.payload["error"]["code"], "bad_upload_host")
+
+    def test_the_multipart_body_carries_the_file_under_a_random_boundary(self):
+        seen = {}
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/plain"}
+
+            def read(self, *_a):
+                return b"OK - 5"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            seen["type"] = request.headers.get("Content-type") or request.get_header("Content-type")
+            seen["body"] = request.data
+            return Response()
+
+        original = slack.urllib.request.urlopen
+        slack.urllib.request.urlopen = fake_urlopen
+        try:
+            ok, problem = slack.post_upload(
+                "https://files.slack.com/upload/v1/abc", 'odd"name\r\n.txt', b"hello")
+        finally:
+            slack.urllib.request.urlopen = original
+        self.assertTrue(ok, problem)
+        boundary = seen["type"].split("boundary=")[1]
+        self.assertIn(boundary.encode(), seen["body"])
+        self.assertIn(b'name="file"', seen["body"])
+        # Quotes and newlines out of a filename would end the header early.
+        self.assertIn(b'filename="oddname.txt"', seen["body"])
+        self.assertTrue(seen["body"].endswith(("--%s--\r\n" % boundary).encode()))
+
+
 class Manifest(unittest.TestCase):
     """The app this plugin asks Slack to make."""
 

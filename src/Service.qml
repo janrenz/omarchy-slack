@@ -61,6 +61,7 @@ Item {
   readonly property var missingScopes: view.missingScopes || []
 
   readonly property bool canPost: view.canPost === true
+  readonly property bool canUpload: view.canUpload === true
   readonly property bool canReact: view.canReact === true
   readonly property bool canMarkRead: view.canMarkRead === true
   readonly property bool canSearch: view.canSearch === true
@@ -647,6 +648,68 @@ Item {
     if (demo) command.push("--demo")
     sendProc.command = command
     sendProc.running = true
+  }
+
+  // ---- sending a file ------------------------------------------------------
+  //
+  // Three requests inside slack.py, and the middle one is the only place this
+  // plugin ever *sends* the user's data anywhere - so the path goes in over
+  // stdin like a message does, and the helper checks the host Slack named
+  // before any of the bytes leave.
+
+  property bool uploading: false
+  property string uploadError: ""
+  // What was sent, for a line that says so. Cleared by the next attempt.
+  property string uploadNotice: ""
+  property string uploadPath: ""
+
+  function uploadFile(path) {
+    var file = String(path || "").trim()
+    if (uploading || !openConversation || file === "" || pluginDir === "") return
+    if (!canUpload) {
+      uploadError = "This token cannot send files. Add files:write to your Slack app."
+      return
+    }
+    uploading = true
+    uploadError = ""
+    uploadNotice = ""
+    uploadPath = file
+    var command = ["python3", helper(), "upload", "--account", alias,
+                   "--channel", String(openConversation.id), "--stdin"]
+    if (threadTs !== "") command = command.concat(["--thread", threadTs])
+    if (demo) command.push("--demo")
+    uploadProc.command = command
+    uploadProc.running = true
+  }
+
+  Process {
+    id: uploadProc
+    running: false
+    stdinEnabled: true
+    stdout: StdioCollector { id: uploadOut; waitForEnd: true }
+    stderr: StdioCollector { id: uploadErrOut; waitForEnd: true }
+    // Whatever is in the message box rides along as the file's comment, which
+    // is what Slack itself does when you drop a file on a conversation with
+    // something already typed.
+    onStarted: uploadProc.write(JSON.stringify({
+      file: root.uploadPath, comment: root.draft
+    }) + "\n")
+    onExited: function(exitCode) {
+      root.uploading = false
+      var parsed = Model.parseJson(uploadOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.uploadError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(uploadErrOut.text || "Could not send that file", 160)
+        // The draft stays put, for the same reason a failed send leaves it:
+        // the comment is something somebody typed.
+        return
+      }
+      root.uploadNotice = "Sent " + String(parsed.title || "that file")
+      root.draft = ""
+      root.reloadConversation()
+      root.refresh()
+    }
   }
 
   Process {

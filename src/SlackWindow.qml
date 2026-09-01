@@ -1,5 +1,7 @@
 import QtQuick
+import QtCore
 import QtQuick.Controls
+import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -111,6 +113,15 @@ Item {
   // rather than tracked.
   property string focusPane: "list"
   property bool showHelp: false
+
+  // A file:// URL from either route - the chooser or a drop - as the path the
+  // helper wants. decodeURIComponent because a space arrives as %20, and it is
+  // a path on this machine either way.
+  function sendFile(fileUrl) {
+    var path = decodeURIComponent(String(fileUrl || "").replace(/^file:\/\//, ""))
+    if (path === "") return
+    service.uploadFile(path)
+  }
 
   // ---- the picture being looked at ----------------------------------------
   //
@@ -410,9 +421,62 @@ Item {
         root.shell.hide(root.pluginId)
     }
 
+    // Sending a file. QtQuick.Dialogs is already how ImageViewer.qml saves one
+    // out, and this is its opposite number - a real file chooser rather than
+    // omarchy's image picker, because what people send into a channel is as
+    // often a log or a PDF as a screenshot.
+    FileDialog {
+      id: attachDialog
+      title: "Send a file to " + (service.openConversation
+        ? String(service.openConversation.title || "this conversation") : "this conversation")
+      fileMode: FileDialog.OpenFile
+      currentFolder: StandardPaths.writableLocation(StandardPaths.DownloadLocation)
+      onAccepted: root.sendFile(selectedFile)
+    }
+
     FocusScope {
       anchors.fill: parent
       focus: true
+
+      // Drop a file anywhere in the window and it goes to the conversation on
+      // screen. Anywhere, rather than on the transcript alone: aiming at a
+      // scrolling list is a worse target than a window, and there is only ever
+      // one conversation open to mean.
+      DropArea {
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+        enabled: service.canUpload && !!service.openConversation && !service.uploading
+        onDropped: function(drop) {
+          if (!drop.hasUrls || drop.urls.length === 0) return
+          // One at a time. Slack takes several, but each is three requests and
+          // a rate limit, and a dropped folder of forty files is not something
+          // to find out about halfway through.
+          root.sendFile(drop.urls[0])
+          drop.acceptProposedAction()
+        }
+
+        // While something is over the window, say what letting go would do.
+        Rectangle {
+          anchors.fill: parent
+          visible: parent.containsDrag
+          color: Util.alpha(Color.accent, 0.08)
+          border.color: Color.accent
+          border.width: Math.max(1, Style.space(2))
+          radius: Style.cornerRadius
+          z: 500
+
+          Text {
+            anchors.centerIn: parent
+            text: "Drop to send to " + (service.openConversation
+              ? String(service.openConversation.title || "") : "")
+            textFormat: Text.PlainText
+            color: Color.accent
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+          }
+        }
+      }
+
 
       // PanelKeyCatcher's vocabulary is Escape, Tab, the arrows, j/k/h/l and
       // Return; Page, Home, End and the control chords are not in it and
@@ -1750,6 +1814,20 @@ Item {
                     onClicked: service.alsoToChannel = !service.alsoToChannel
                   }
 
+                  // Only when the token may: a button that always answers
+                  // "this token cannot send files" is worse than no button.
+                  Button {
+                    visible: service.canUpload
+                    enabled: !service.uploading
+                    text: service.uploading ? "Sending…" : "Attach"
+                    tooltipText: "Send a file into this conversation. Anything typed in the box goes with it as its comment, and a file dropped on the window does the same."
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: attachDialog.open()
+                  }
+
                   Button {
                     enabled: !service.messagesLoading
                     text: "Reload"
@@ -1764,11 +1842,16 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: text !== ""
                     text: service.sendError !== "" ? service.sendError
-                          : (service.reactError !== "" ? service.reactError
-                             : (service.markReadError !== "" ? service.markReadError : ""))
+                          : (service.uploadError !== "" ? service.uploadError
+                             : (service.reactError !== "" ? service.reactError
+                                : (service.markReadError !== "" ? service.markReadError
+                                   : service.uploadNotice)))
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
-                    color: Color.urgent
+                    // The only one of these that is not a failure.
+                    color: (service.sendError === "" && service.uploadError === ""
+                            && service.reactError === "" && service.markReadError === "")
+                           ? Qt.darker(Color.foreground, 1.4) : Color.urgent
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                   }

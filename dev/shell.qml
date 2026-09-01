@@ -186,6 +186,13 @@ ShellRoot {
       return out.join("\n")
     }
 
+    // The two routes into uploadFile() without a mouse: the file chooser and a
+    // drop both end at sendFile(), so this is what a drag onto the window does.
+    function attach(path: string): string {
+      panel.sendFile("file://" + path)
+      return "ok"
+    }
+
     function state(): string {
       var service = panel.slackService
       return JSON.stringify({

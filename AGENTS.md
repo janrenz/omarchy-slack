@@ -22,6 +22,9 @@ src/Service.qml        Owns the Processes that run slack.py, the poll timer,
                        and the state the UI binds to.
 src/BarWidget.qml      The bar icon. Opens the window; there is no dropdown.
 src/SlackWindow.qml    The window. Sidebar, transcript, message box. ~2k lines.
+                       Also the file chooser and the window-wide DropArea, which
+                       both end at sendFile() - the one place a file:// URL
+                       becomes a path.
 src/Notifier.qml       omarchy-notification-send, the prime-then-announce rule,
                        and the click that opens the conversation.
 src/PollGate.qml       Whether it is worth polling at all: idle, network, battery.
@@ -42,7 +45,12 @@ Nothing goes back the other way except a command line and a stdin payload.
 2. **The window never fetches anything remote.** Avatars, images and files are
    fetched by the helper, checked against Slack's own hosts first, and the token
    is attached for `files.slack.com` alone. An `<img src="https://evil/">` in a
-   message must not be able to collect a token or report a read receipt.
+   message must not be able to collect a token or report a read receipt. The
+   same rule runs the other way for the one request that *sends*: an upload URL
+   comes back from `files.getUploadURLExternal`, and `UPLOAD_HOSTS` is checked
+   before any of the user's file leaves - an API response is a better source
+   than a message, but it is still somebody else naming where our data goes, and
+   no token is attached there because that URL carries its own.
 3. **A message never chooses its own markup.** `slack.py` flattens mrkdwn to
    text. The only tag the window ever builds is an `<a>` around text it escaped
    itself, from an offset into that text. `http`, `https`, `mailto` only —
@@ -142,6 +150,15 @@ fatal QML error makes it exit instead.
   interval. The mail plugin solved the same problem by moving the data into a
   `kinds: ["service"]` singleton (`Store.qml`); this plugin has not yet. Bear it
   in mind before adding another poll.
+- **Sending a file is three requests, and only the third shares it.**
+  `files.getUploadURLExternal` reserves an id and a URL, the bytes go to that
+  URL as `multipart/form-data` with one part named `file` (which is what Slack's
+  own example posts, and that endpoint answers in plain text, not JSON), and
+  `files.completeUploadExternal` is what puts it in a conversation. A failure at
+  the third step leaves the file on Slack's side and in no conversation, which
+  is why that one reports `upload_incomplete` rather than a plain failure. One
+  file per call on purpose: three requests each against a rate limit, and a
+  dropped folder of forty is not something to discover halfway through.
 - **Slack's rate limits are the design constraint**, not an annoyance. Previews
   for the whole workspace cost *one* search per poll, because non-Marketplace
   apps get roughly one `conversations.history` a minute plus a burst of fifteen.

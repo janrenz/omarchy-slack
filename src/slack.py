@@ -102,6 +102,7 @@ CAPABILITIES = {
     "openDm": ("im:write",),
     "join": ("channels:write",),
     "files": ("files:read",),
+    "upload": ("files:write",),
     "people": ("users:read",),
 }
 
@@ -114,7 +115,7 @@ WANTED_SCOPES = [
     "im:history", "im:read", "im:write",
     "mpim:history", "mpim:read", "mpim:write",
     "chat:write", "reactions:read", "reactions:write",
-    "users:read", "files:read", "search:read", "emoji:read",
+    "users:read", "files:read", "files:write", "search:read", "emoji:read",
 ]
 
 
@@ -572,6 +573,15 @@ def newer(left, right):
 # --------------------------------------------------------------------------
 
 TOKEN_HOSTS = ("files.slack.com",)
+# Where a file may be *sent*. Slack hands back an upload URL, and this is
+# checked before the bytes go anywhere: the URL arrives in an API response
+# rather than in a message, but it is still a host named by somebody else, and
+# what would be posted to it is the user's own file.
+UPLOAD_HOSTS = ("files.slack.com",)
+# What this plugin will put in memory to send. Slack's own limit is a thousand
+# times this; a shell plugin that reads a gigabyte into a Python string to hand
+# it to a QML window is not a feature anybody asked for, and the error says so.
+UPLOAD_CAP = 25 * 1024 * 1024
 IMAGE_HOSTS = ("files.slack.com", "avatars.slack-edge.com", "a.slack-edge.com",
                "secure.gravatar.com", "ca.slack-edge.com", "emoji.slack-edge.com")
 IMAGE_CAP = 12 * 1024 * 1024
@@ -1762,6 +1772,148 @@ def cmd_send(args):
     out({"ok": True, "ts": str(payload.get("ts") or "")})
 
 
+def read_upload(path):
+    """The bytes to send, or a refusal a person can act on.
+
+    A directory, a socket or a device is not a file to send even though it has
+    a path, and a helpful error beats a traceback in a JSON field.
+    """
+    if not path:
+        fail("no_file", "No file to send")
+    if not os.path.isfile(path):
+        fail("no_file", "There is no file at %s" % path)
+    try:
+        size = os.path.getsize(path)
+    except OSError as error:
+        fail("unreadable", "Could not read %s: %s" % (path, error))
+    if size == 0:
+        fail("empty_file", "That file is empty")
+    if size > UPLOAD_CAP:
+        fail("too_large", "That file is %.1f MB; this sends up to %d MB" % (
+            size / 1048576.0, UPLOAD_CAP // 1048576))
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(UPLOAD_CAP + 1)
+    except OSError as error:
+        fail("unreadable", "Could not read %s: %s" % (path, error))
+
+
+def post_upload(url, filename, body, timeout=120):
+    """PUT the bytes where Slack said to put them.
+
+    The URL comes back from files.getUploadURLExternal and carries its own
+    authorisation, so no token is attached here - and the host is checked
+    first, because this is the one request in the plugin that *sends* the
+    user's data somewhere rather than reading somebody else's.
+    """
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    if parsed.scheme != "https" or parsed.hostname not in UPLOAD_HOSTS:
+        fail("bad_upload_host",
+             "Slack asked for the upload to go to %s, which this plugin will not do"
+             % (parsed.hostname or "nowhere"))
+
+    # multipart/form-data with one part named "file", which is what Slack's own
+    # documented example posts. The boundary is random so it cannot appear in
+    # the body by accident.
+    boundary = "----omarchy" + hashlib.sha256(os.urandom(16)).hexdigest()[:24]
+    head = ("--%s\r\n"
+            'Content-Disposition: form-data; name="file"; filename="%s"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+            % (boundary, filename.replace('"', "").replace("\r", "").replace("\n", "")))
+    payload = head.encode("utf-8") + body + ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+
+    request = urllib.request.Request(url, data=payload, method="POST", headers={
+        "User-Agent": USER_AGENT,
+        "Content-Type": "multipart/form-data; boundary=" + boundary,
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            # This endpoint answers in plain text ("OK - 1234"), not JSON, so
+            # the status is the whole answer.
+            read_capped(response)
+            return 200 <= response.status < 300, ""
+    except urllib.error.HTTPError as error:
+        return False, "the upload was refused (HTTP %d)" % error.code
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return False, "the upload could not be sent: %s" % error
+
+
+def cmd_upload(args):
+    """Send a file into a conversation, in Slack's three steps.
+
+    getUploadURLExternal reserves an id and a URL, the bytes go to that URL,
+    and completeUploadExternal is what actually puts the file in the channel -
+    until that third call the file exists and nobody can see it.
+    """
+    path = str(args.file or "")
+    comment = str(args.comment or "")
+    if args.stdin:
+        payload = read_stdin_json()
+        path = str(payload.get("file") or path)
+        comment = str(payload.get("comment") or comment)
+    path = os.path.expanduser(path.strip())
+    title = str(args.title or "").strip() or os.path.basename(path)
+
+    # Read and check the file before the demo bail-out, so demo refuses exactly
+    # what the real thing would refuse. Anything below that line reaches Slack.
+    body = read_upload(path)
+    if args.demo:
+        out({"ok": True, "id": "demo-file", "title": title, "bytes": len(body)})
+
+    account = load_account(args.account)
+    if not granted(account, "upload"):
+        fail("permission_required", scope_error(["files:write"]))
+    if comment and not granted(account, "post"):
+        fail("permission_required", scope_error(["chat:write"]))
+    api = Slack(account["token"])
+
+    ok, reserved = api.call("files.getUploadURLExternal", {
+        "filename": os.path.basename(path),
+        "length": str(len(body)),
+    })
+    remember_scopes(args.account, account, api)
+    if not ok:
+        code = reserved.get("error", "")
+        if code in ("missing_scope", "not_allowed_token_type"):
+            fail("permission_required", scope_error(["files:write"]))
+        fail("upload_failed", friendly(code))
+
+    file_id = str(reserved.get("file_id") or "")
+    url = str(reserved.get("upload_url") or "")
+    if not file_id or not url:
+        fail("upload_failed", "Slack did not say where to put that file")
+
+    sent, problem = post_upload(url, os.path.basename(path), body)
+    if not sent:
+        fail("upload_failed", "Slack reserved a place for that file but %s" % problem)
+
+    files = [{"id": file_id, "title": title}]
+    params = {"files": json.dumps(files), "channel_id": args.channel}
+    if args.thread:
+        params["thread_ts"] = args.thread
+    if comment:
+        # Escaped the way a message is: a filename or a comment must not be
+        # able to turn a stray < into somebody else's link.
+        params["initial_comment"] = comment.replace("&", "&amp;").replace(
+            "<", "&lt;").replace(">", "&gt;")
+    ok, completed = api.call("files.completeUploadExternal", params)
+    if not ok:
+        code = completed.get("error", "")
+        if code in ("missing_scope", "not_allowed_token_type"):
+            fail("permission_required", scope_error(["files:write"]))
+        # The bytes are on Slack's side but in no conversation. Say so: a
+        # "failed" that leaves a file half-shared is worth being precise about.
+        fail("upload_incomplete",
+             "That file reached Slack but could not be posted: %s" % friendly(code))
+
+    shared = (completed.get("files") or [{}])[0]
+    out({"ok": True,
+         "id": file_id,
+         "title": title,
+         "bytes": len(body),
+         "permalink": str(shared.get("permalink") or "")})
+
+
 def cmd_react(args):
     name = str(args.emoji or "").strip().strip(":")
     if not name:
@@ -2456,6 +2608,17 @@ def main():
     send.add_argument("--stdin", action="store_true", help='read {"text": "..."} from stdin')
     send.add_argument("--demo", action="store_true")
     send.set_defaults(func=cmd_send)
+
+    upload = with_account("upload", "send a file into a conversation")
+    upload.add_argument("--channel", required=True)
+    upload.add_argument("--thread", default="", help="send it into this thread")
+    upload.add_argument("--file", default="", help="path to send; --stdin is what the window uses")
+    upload.add_argument("--comment", default="", help="a message to go with it")
+    upload.add_argument("--title", default="", help="what it is called in Slack (default: the filename)")
+    upload.add_argument("--stdin", action="store_true",
+                        help='read {"file": "...", "comment": "..."} from stdin')
+    upload.add_argument("--demo", action="store_true")
+    upload.set_defaults(func=cmd_upload)
 
     react = with_account("react", "add or remove your reaction on a message")
     react.add_argument("--channel", required=True)

@@ -232,6 +232,7 @@ function accountView(snapshot, alias) {
       // falsey, so the feature quietly stays switched off and the button
       // offering to enable it stays switched on for ever.
       canPost: data.post === true,
+      canUpload: data.upload === true,
       canReact: data.react === true,
       canMarkRead: data.markRead === true,
       canSearch: data.search === true,
@@ -261,7 +262,7 @@ function accountView(snapshot, alias) {
   return {
     alias: String(alias || ""), ok: false, loaded: false, team: "", url: "",
     userId: "", userName: "", displayName: "",
-    canPost: false, canReact: false, canMarkRead: false, canSearch: false,
+    canPost: false, canUpload: false, canReact: false, canMarkRead: false, canSearch: false,
     canOpenDm: false, canJoin: false, canSeePresence: false, canFindPeople: false,
     dms: [], channels: [], unreadCount: 0, unreadMessages: 0, covered: 0, total: 0,
     coveredChannels: 0, totalChannels: 0, hiddenDms: 0, feed: true,

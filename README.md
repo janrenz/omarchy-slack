@@ -118,6 +118,7 @@ uses, is an app you install into your own workspace and a token it shows you.
          - reactions:write
          - users:read
          - files:read
+         - files:write
          - search:read
    settings:
      org_deploy_enabled: false
@@ -181,10 +182,32 @@ scope would enable the rest, rather than showing a button that fails.
 | `reactions:read`, `reactions:write` | reactions, and yours | the chips are gone |
 | `users:read` | names, faces, and who is around | ids where names would be |
 | `files:read` | pictures in the transcript | files are chips only |
+| `files:write` | sending a file | no **Attach** button, and dropping a file on the window does nothing |
 | `search:read` | searching every message — **and every preview and unread mark in the sidebar**, see below | the sidebar is names only |
 
 Adding a scope later means editing the app, reinstalling it, and pasting the
-new token. The plugin notices the moment it has it.
+new token. The plugin notices the moment it has it. That includes `files:write`,
+which an app installed before this plugin could send files will not have.
+
+## Sending a file
+
+**Attach** beside Send opens a file chooser, and dropping a file anywhere on the
+window does the same thing — anywhere rather than on the transcript, because
+aiming at a scrolling list is a worse target than a window, and there is only
+ever one conversation open to mean. Whatever is in the message box goes with the
+file as its comment, which is what Slack itself does.
+
+One file at a time. Slack takes several, but each one is three requests against
+a rate limit, and a folder of forty dropped by accident is not something to find
+out about halfway through. The cap is 25 MB — Slack's own is a thousand times
+that, but the file is read into memory to be sent, and a shell should not hold a
+gigabyte to pass it along.
+
+The upload is three steps and only the last one shares anything: Slack reserves
+an id and a URL, the bytes go to that URL, and a third call puts the file in the
+conversation. If that third call fails the file exists and nobody can see it,
+and the plugin says exactly that rather than calling it a failure.
+
 
 ## Keyboard
 
