@@ -80,9 +80,15 @@ Item {
   // are already here, which is a different thing from the quick switcher -
   // that one goes looking through the whole workspace.
   property string filterText: ""
+  // Whether the direct messages nothing has been said in lately are unfolded.
+  // A view of the list like unreadOnly, and forgotten the same way: the fold
+  // is there so the section reads at a glance, and it should read that way
+  // again the next time the window is opened.
+  property bool showAllDms: false
 
   readonly property var conversations: Model.conversationRows(
-    view, { unreadOnly: unreadOnly, filter: filterText, presence: presenceByUser })
+    view, { unreadOnly: unreadOnly, filter: filterText, presence: presenceByUser,
+            showAllDms: showAllDms })
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -669,9 +675,17 @@ Item {
 
   function uploadFile(path) {
     var file = String(path || "").trim()
-    if (uploading || !openConversation || file === "" || pluginDir === "") return
+    if (!openConversation || file === "" || pluginDir === "") return
+    // Both of these used to be a silent return, which is what a file dropped
+    // on the window looked like from the outside: nothing happened and nothing
+    // said why. They are the two answers a drop most often deserves.
+    if (uploading) {
+      uploadError = "One file at a time - the last one is still going up"
+      return
+    }
     if (!canUpload) {
-      uploadError = "This token cannot send files. Add files:write to your Slack app."
+      uploadError = "This token cannot send files. Add files:write to your Slack app, "
+                  + "reinstall it, and paste the new token in Settings."
       return
     }
     uploading = true

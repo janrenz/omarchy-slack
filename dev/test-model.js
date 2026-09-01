@@ -129,6 +129,77 @@ test("unread-only keeps what is waiting and says so when nothing is", () => {
   eq(quiet[0].title, "Nothing unread")
 })
 
+// A DM the helper padded the section out with has no date on it: nothing has
+// been said in it lately. Those fold behind one row.
+const quietDm = (id, title) => dm({ id, title, when: "", ts: "", lastText: "" })
+
+const folding = (dms, options) => Model.conversationRows(Model.accountView(snapshot([
+  { alias: "work", ok: true, dms, channels: [] }]), "work"), options || {})
+
+test("direct messages with nothing said in them lately fold behind one row", () => {
+  const rows = folding([dm(), quietDm("D8", "Yuki Tanaka"), quietDm("D9", "Ana Beltrán")])
+  eq(rows.filter(r => r.kind === "conversation").map(r => r.title), ["Priya Raman"])
+  const more = rows.filter(r => r.kind === "more")
+  eq(more.length, 1)
+  eq(more[0].title, "Show 2 more")
+  eq(more[0].expanded, false)
+})
+
+test("unfolding shows every one of them, and offers the way back", () => {
+  const rows = folding([dm(), quietDm("D8", "Yuki Tanaka")], { showAllDms: true })
+  eq(rows.filter(r => r.kind === "conversation").map(r => r.title),
+     ["Priya Raman", "Yuki Tanaka"])
+  eq(rows.filter(r => r.kind === "more")[0].title, "Show fewer")
+})
+
+test("unread is never folded away, dated or not", () => {
+  // A date is not what makes a direct message matter.
+  const rows = folding([dm(), dm({ id: "D8", title: "Dana Okafor", when: "", ts: "",
+                                   unread: true, unreadCount: 2 })])
+  eq(rows.filter(r => r.kind === "conversation").map(r => r.title),
+     ["Priya Raman", "Dana Okafor"])
+  eq(rows.filter(r => r.kind === "more").length, 0)
+})
+
+test("a section that is nothing but quiet ones is left alone", () => {
+  // "Show 12 more" over an empty section says less than the twelve names do.
+  const rows = folding([quietDm("D8", "Yuki Tanaka"), quietDm("D9", "Ana Beltrán")])
+  eq(rows.filter(r => r.kind === "conversation").length, 2)
+  eq(rows.filter(r => r.kind === "more").length, 0)
+})
+
+test("asking for a subset already is asking for all of it", () => {
+  // A filter and the unread toggle are somebody naming what they want; folding
+  // half of the answer away is the opposite of answering.
+  const dms = [dm(), quietDm("D8", "Yuki Tanaka")]
+  eq(folding(dms, { filter: "yuki" }).filter(r => r.kind === "more").length, 0)
+  eq(folding(dms, { filter: "yuki" }).filter(r => r.kind === "conversation")
+       .map(r => r.title), ["Yuki Tanaka"])
+  eq(folding(dms, { unreadOnly: true }).filter(r => r.kind === "more").length, 0)
+})
+
+test("the fold is something the cursor can land on and press Return on", () => {
+  const rows = folding([dm(), quietDm("D8", "Yuki Tanaka")])
+  const landable = Model.selectableRows(rows)
+  eq(landable.map(i => rows[i].kind), ["conversation", "more"])
+})
+
+test("what is not in the payload at all is only said once the fold is open", () => {
+  const view = Model.accountView(snapshot([{ alias: "work", ok: true, hiddenDms: 5,
+    dms: [dm(), quietDm("D8", "Yuki Tanaka")], channels: [] }]), "work")
+  // Two "there is more" lines under each other makes neither of them mean
+  // anything, so the fold speaks first and the note waits its turn.
+  eq(Model.conversationRows(view, {}).filter(r => r.kind === "note").length, 0)
+  eq(Model.conversationRows(view, { showAllDms: true })
+       .filter(r => r.kind === "note")[0].title, "and 5 older direct messages")
+
+  // With nothing to fold, it is said the way it always was.
+  const dated = Model.accountView(snapshot([{ alias: "work", ok: true, hiddenDms: 5,
+    dms: [dm()], channels: [] }]), "work")
+  eq(Model.conversationRows(dated, {}).filter(r => r.kind === "note")[0].title,
+     "and 5 older direct messages")
+})
+
 test("the filter looks at what was said as well as who said it", () => {
   eq(Model.conversationRows(view, { filter: "design" })
        .filter(r => r.kind === "conversation").map(r => r.title), ["#design"])

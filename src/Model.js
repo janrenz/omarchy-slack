@@ -324,6 +324,7 @@ function conversationRows(view, options) {
   var settings = options || {}
   var onlyUnread = settings.unreadOnly === true
   var filter = String(settings.filter || "").trim().toLowerCase()
+  var showAllDms = settings.showAllDms === true
   var rows = []
 
   function keep(list) {
@@ -344,15 +345,47 @@ function conversationRows(view, options) {
   var channels = keep((view && view.channels) || [])
   var presence = settings.presence || null
 
-  if (dms.length > 0) rows.push({ kind: "heading", key: "h:dms", title: "Direct messages", depth: 0 })
-  for (var d = 0; d < dms.length; d++) rows.push(conversationRow(dms[d], presence))
+  // A DM with no date on it is one nothing has been said in lately. The helper
+  // pads the section out with them, in interest order, so the list does not
+  // stop at the four people who wrote this week - useful, and still not what
+  // the eye is looking for. So they fold behind one row and the dated ones
+  // stand on their own.
+  //
+  // Never folded: anything unread, because a date is not what makes a DM
+  // matter. And nothing at all while a filter or the unread toggle is on -
+  // those are already somebody asking for a particular subset.
+  var dated = []
+  var quiet = []
+  for (var q = 0; q < dms.length; q++) {
+    if (String(dms[q].when || "") !== "" || dms[q].unread === true) dated.push(dms[q])
+    else quiet.push(dms[q])
+  }
+  // All of them quiet is a new account or a very quiet week, and a section
+  // that is nothing but "show 12 more" says less than the twelve names do.
+  var foldable = !onlyUnread && filter === "" && dated.length > 0 && quiet.length > 0
+  var shownDms = (foldable && !showAllDms) ? dated : dms
 
-  // How many were left out, and where they are. An account that has been on
-  // Slack for years has hundreds of group DMs that were one conversation in
+  if (dms.length > 0) rows.push({ kind: "heading", key: "h:dms", title: "Direct messages", depth: 0 })
+  for (var d = 0; d < shownDms.length; d++) rows.push(conversationRow(shownDms[d], presence))
+
+  // The one row that stands for the rest of them. Picked like a conversation -
+  // by pointer or by cursor - and the window turns it into the other half of
+  // the list rather than into anything being opened.
+  if (foldable)
+    rows.push({ kind: "more", key: "more:dms", expanded: showAllDms,
+                title: showAllDms ? "Show fewer" : ("Show " + quiet.length + " more"),
+                subtitle: showAllDms ? "" : "quiet - n finds anyone",
+                when: "", unread: false, depth: 0 })
+
+  // How many are not here at all, and where they are. An account that has been
+  // on Slack for years has hundreds of group DMs that were one conversation in
   // 2023; the sidebar draws the ones with something in them, and this says so
-  // rather than letting the list quietly stop.
+  // rather than letting the list quietly stop. Only once the fold is open:
+  // two "there is more" lines under each other makes neither of them mean
+  // anything.
   var hidden = Number((view && view.hiddenDms) || 0)
-  if (dms.length > 0 && hidden > 0 && !onlyUnread && filter === "")
+  if (dms.length > 0 && hidden > 0 && !onlyUnread && filter === ""
+      && (!foldable || showAllDms))
     rows.push({ kind: "note", key: "note:more-dms",
                 title: "and " + hidden + " older direct message" + (hidden === 1 ? "" : "s"),
                 subtitle: "press n to jump to one", when: "", unread: false, depth: 0 })
@@ -372,12 +405,14 @@ function conversationRows(view, options) {
   return rows
 }
 
-// Rows a cursor may land on - never a heading, never a note.
+// Rows a cursor may land on - never a heading, never a note. The row that
+// unfolds the quiet direct messages is one of them: it is something to press
+// Return on, which is the whole reason it is not a note.
 function selectableRows(rows) {
   var out = []
   var list = rows || []
   for (var i = 0; i < list.length; i++)
-    if (list[i].kind === "conversation") out.push(i)
+    if (list[i].kind === "conversation" || list[i].kind === "more") out.push(i)
   return out
 }
 

@@ -46,6 +46,11 @@ Column {
 
   readonly property var selectable: Model.selectableRows(rows)
 
+  // Folding the quiet direct messages away makes the list shorter under a
+  // cursor that was already past where it now ends. Left alone, nothing is
+  // cursored until the next keypress moves it back into range.
+  onSelectableChanged: if (cursorIndex >= selectable.length) cursorIndex = selectable.length - 1
+
   function moveCursor(step) {
     if (selectable.length === 0) return
     var next = cursorIndex < 0 ? (step > 0 ? 0 : selectable.length - 1) : cursorIndex + step
@@ -67,6 +72,10 @@ Column {
 
       readonly property bool isHeading: modelData.kind === "heading"
       readonly property bool isNote: modelData.kind === "note"
+      // The row that folds the quiet direct messages away and back. Not a
+      // conversation - there is nothing behind it to open - but not inert
+      // either: it is the one row in the list that is a control.
+      readonly property bool isMore: modelData.kind === "more"
       // Headings label; notes explain. Neither is something to click.
       readonly property bool inert: isHeading || isNote
       readonly property bool isChannel: String(modelData.channelKind || "") === "channel"
@@ -112,7 +121,7 @@ Column {
         anchors.left: parent.left
         anchors.leftMargin: root.markerGutter
         anchors.verticalCenter: parent.verticalCenter
-        visible: !line.inert && (root.showAvatars || line.isChannel)
+        visible: !line.inert && !line.isMore && (root.showAvatars || line.isChannel)
         size: root.faceSize
         // A channel has no face. The hash it is called by is the icon it
         // already has, and drawing initials for "#platform" would be a "P"
@@ -133,7 +142,7 @@ Column {
         // Stops where the timestamp starts. Without this the title is free to
         // be as wide as it likes, elide does nothing, and a long name runs
         // straight under the time - which it did, at compact spacing.
-        anchors.right: stamp.visible ? stamp.left : parent.right
+        anchors.right: stamp.visible ? stamp.left : (fold.visible ? fold.left : parent.right)
         anchors.verticalCenter: parent.verticalCenter
         anchors.leftMargin: root.markerGutter
                             + (face.visible ? face.size + Style.spacing.md : 0)
@@ -167,7 +176,7 @@ Column {
             text: String(line.modelData.title || "")
             textFormat: Text.PlainText
             elide: Text.ElideRight
-            color: line.inert ? root.dim : root.fg
+            color: (line.inert || line.isMore) ? root.dim : root.fg
             font.family: root.fontFamily
             font.pixelSize: line.isHeading ? Style.font.caption : Style.font.body
             font.bold: line.isHeading || line.modelData.unread === true || line.selected
@@ -211,6 +220,22 @@ Column {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
+      }
+
+      // Which way the fold would go, where a row that has one carries its
+      // time. An arrow rather than a word: the row already says "Show 12 more"
+      // and the second half of that sentence is what direction it opens.
+      Text {
+        id: fold
+        anchors.right: parent.right
+        anchors.rightMargin: Style.spacing.md
+        anchors.verticalCenter: parent.verticalCenter
+        visible: line.isMore
+        text: line.modelData.expanded === true ? "\u2303" : "\u2304"
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
       }
 
       Text {

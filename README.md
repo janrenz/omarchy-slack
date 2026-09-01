@@ -11,7 +11,12 @@ of their own.
 - **Channels, group DMs and direct messages**, with unread marks, unread
   counts, previews and faces — all of it from one search per poll rather than
   one request per conversation, because Slack does not allow the latter (see
-  below; it is the most interesting thing about this plugin).
+  below; it is the most interesting thing about this plugin). The direct
+  messages nothing has been said in lately carry no date, and fold behind a
+  **Show 4 more** row rather than burying the four people who wrote this week —
+  anything unread stays out in the open regardless, filtering or the unread
+  toggle unfolds it, and `n` reaches every DM by name whether it is folded or
+  not.
 - **Threads, and which of them have something new.** The part of Slack where
   half the conversation actually happens. A message with replies wears a chip
   saying how many — and the chip fills in and reads **`4 replies · new`** when
@@ -24,8 +29,10 @@ of their own.
 - **Search**, Slack's own, over every message you can see. A result opens the
   conversation *at that message* rather than at today's chatter.
 - **Reactions**, counted, with yours marked — click a chip to add or remove
-  yours. Keyboard first: `j`/`k` walk the transcript, `e` opens the picker on
-  the message under the cursor, `1`–`9` pick.
+  yours. The pointer on a chip says who reacted, what the emoji is called, and
+  which of the two a click would do. Keyboard first: `j`/`k` walk the
+  transcript, `e` opens the picker on the message under the cursor, `1`–`9`
+  pick.
 - **A picture opens in the window**, whole rather than cropped to the thumbnail, with **Save as…** to keep a copy — a real save dialog, starting in your Downloads folder and suggesting a name from what the message called the picture. `s` saves, `o` hands it to whatever else views images, `Escape` closes.
 - **Mentions, channel links, emoji, pictures and files**, all resolved:
   `<@U024BE7LH>` becomes a name, `:tada:` becomes 🎉, an image is drawn inline,
@@ -184,7 +191,7 @@ scope would enable the rest, rather than showing a button that fails.
 | `reactions:read`, `reactions:write` | reactions, and yours | the chips are gone |
 | `users:read` | names, faces, and who is around | ids where names would be |
 | `files:read` | pictures in the transcript | files are chips only |
-| `files:write` | sending a file | no **Attach** button, and dropping a file on the window does nothing |
+| `files:write` | sending a file | no **Attach** button, and a file dropped on the window is turned away with a line saying this scope is why |
 | `search:read` | searching every message — **and every preview and unread mark in the sidebar**, see below | the sidebar is names only |
 
 Adding a scope later means editing the app, reinstalling it, and pasting the
@@ -198,6 +205,11 @@ window does the same thing — anywhere rather than on the transcript, because
 aiming at a scrolling list is a worse target than a window, and there is only
 ever one conversation open to mean. Whatever is in the message box goes with the
 file as its comment, which is what Slack itself does.
+
+A drop that will not go through says so while the file is still in the air:
+the window outlines itself and names what is in the way — no conversation open,
+a file already going up, or a token without `files:write`, which is the usual
+reason a drop looks like it did nothing at all.
 
 One file at a time. Slack takes several, but each one is three requests against
 a rate limit, and a folder of forty dropped by accident is not something to find
@@ -544,6 +556,36 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 |---|---|
 | `demo` | Answer every read from the fixtures, and refuse every write. |
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
+
+## Changelog
+
+### 0.2.0 — 2026-09-01
+
+- **A file dropped on the window is answered, not ignored.** The drop area used
+  to switch itself off when the token could not send files, when nothing was
+  open, or while another file was going up - so a drop did nothing at all and
+  said nothing about why. It now stays live and the overlay names what is in
+  the way while the file is still in the air, in the urgent colour; letting go
+  anyway says the same thing on the line under the composer. A link dragged out
+  of a browser is turned away by name rather than failing as a path that never
+  was one.
+- **A reaction chip says who reacted.** Under the pointer: the people, what the
+  emoji is called, and which of add-or-remove a click would do. `slack.py`
+  resolves the reactors' names alongside the senders' - last, so a busy
+  transcript never spends its lookup budget on a tooltip and leaves a sender
+  showing as a raw id - and an id nobody could name is left off rather than
+  shown. The picker's faces name themselves too.
+- **Direct messages with nothing said in them lately fold away.** The helper
+  pads the section out to a useful length with conversations that carry no
+  date; those now sit behind one **Show N more** row instead of burying the
+  four people who wrote this week. Anything unread stays out in the open, a
+  filter or the unread toggle unfolds it, the row is something the cursor can
+  land on and press Return on, and `n` still reaches every DM by name.
+
+### 0.1.0
+
+- First release.
+
 
 ## License
 

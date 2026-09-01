@@ -279,6 +279,36 @@ class Reactions(unittest.TestCase):
             {"name": "shipit-squirrel", "count": 1, "users": []}]}, "U1")
         self.assertEqual(rows[0]["emoji"], ":shipit-squirrel:")
 
+    def test_who_reacted_is_named_for_the_line_a_chip_shows(self):
+        users = {"U1": {"name": "Jan Renz"}, "U2": {"name": "Ana Beltr\u00e1n"}}
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "+1", "count": 4, "users": ["U2", "U1", "U7"]}]}, "U1", users)
+        # Yourself first and as "You". U7 is somebody this fetch has no name
+        # for, and an id on a tooltip is noise - the count still says four.
+        self.assertEqual(rows[0]["who"], ["You", "Ana Beltr\u00e1n"])
+        self.assertEqual(rows[0]["count"], 4)
+
+    def test_an_id_nobody_could_name_is_left_off_the_line(self):
+        # resolve_users remembers an unnameable id as its own name.
+        users = {"U7": {"name": "U7"}}
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "+1", "count": 1, "users": ["U7"]}]}, "U1", users)
+        self.assertEqual(rows[0]["who"], [])
+
+    def test_whoever_reacted_is_looked_up_with_the_senders(self):
+        # Last, so a busy transcript never spends its lookup budget on
+        # tooltips and leaves a sender showing as a raw id.
+        ids = slack.mentioned_ids([
+            {"user": "U001", "text": "hi <@U002>",
+             "reactions": [{"name": "+1", "count": 2, "users": ["U003", "U004"]}]}])
+        self.assertEqual(ids, ["U002", "U001", "U003", "U004"])
+
+    def test_without_the_people_a_chip_is_still_a_chip(self):
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "+1", "count": 2, "users": ["U2", "U3"]}]}, "U1")
+        self.assertEqual(rows[0]["who"], [])
+        self.assertEqual(rows[0]["count"], 2)
+
 
 class Timestamps(unittest.TestCase):
     def test_newer_compares_as_a_number_and_not_as_text(self):

@@ -1018,7 +1018,30 @@ def file_rows(message):
     return images, others
 
 
-def reaction_rows(message, me_id):
+def reactor_names(users, ids, me_id):
+    """Who reacted, by name, for the line a chip shows under the pointer.
+
+    Only the people this fetch already knows about: an id nobody has a name
+    for reads as noise on a tooltip, and the count is what says how many
+    there were either way. Yourself first and as "You", the way every chat
+    client names you in your own reaction list.
+    """
+    names = []
+    for user_id in ids or []:
+        if me_id and str(user_id) == str(me_id):
+            if "You" not in names:
+                names.insert(0, "You")
+            continue
+        row = (users or {}).get(str(user_id or ""))
+        name = str((row or {}).get("name") or "")
+        # resolve_users remembers an id it could not name as its own name, so
+        # the transcript stays readable. On a tooltip that reads as noise.
+        if name and name != str(user_id) and name not in names:
+            names.append(name)
+    return names
+
+
+def reaction_rows(message, me_id, users=None):
     """A message's reactions, counted, with yours marked.
 
     That is what makes a chip a toggle rather than a label: clicking one you
@@ -1029,6 +1052,7 @@ def reaction_rows(message, me_id):
         name = str(reaction.get("name") or "")
         if not name:
             continue
+        who = [str(u) for u in (reaction.get("users") or [])]
         rows.append({
             "name": name,
             # A workspace's own emoji is a picture living in that workspace,
@@ -1036,7 +1060,11 @@ def reaction_rows(message, me_id):
             # be given instead, which is what Slack's own clients fall back to.
             "emoji": emoji_table.char_for(name) or (":%s:" % name.split("::")[0]),
             "count": int(reaction.get("count") or 0),
-            "mine": str(me_id or "") in [str(u) for u in (reaction.get("users") or [])],
+            "mine": str(me_id or "") in who,
+            # Named, not just counted. Slack sends the ids it has - which for a
+            # much-reacted message is fewer than the count - so the window
+            # takes both and says "and four more" for the difference.
+            "who": reactor_names(users, who, me_id)[:12],
         })
     rows.sort(key=lambda row: (-row["count"], row["name"]))
     return rows
@@ -1085,7 +1113,7 @@ def message_row(message, users, channels, me_id, avatars=None):
         "mine": bool(me_id) and sender_id == str(me_id),
         "images": images,
         "files": files,
-        "reactions": reaction_rows(message, me_id),
+        "reactions": reaction_rows(message, me_id, users),
         # A thread hangs off its first message. `thread_ts == ts` is the
         # parent; anything else with a thread_ts is a reply, which only shows
         # up in a channel at all when somebody ticked "also send to channel".
@@ -1705,14 +1733,23 @@ MENTION = re.compile(r"<@([UWB][A-Z0-9]{2,})")
 
 
 def mentioned_ids(messages):
-    """Every person named inside these messages, so they can be resolved in one go."""
+    """Every person these messages point at, so they can be resolved in one go.
+
+    Whoever reacted counts, because a chip says who under the pointer - but
+    last: resolve_users only asks about so many at once, and an unnamed sender
+    in the transcript itself is worse than an unnamed name in a tooltip.
+    """
     found = []
+    reactors = []
     for message in messages:
         for match in MENTION.finditer(message_source(message)):
             found.append(match.group(1))
         if message.get("user"):
             found.append(str(message["user"]))
-    return found
+        for reaction in message.get("reactions") or []:
+            for user_id in reaction.get("users") or []:
+                reactors.append(str(user_id))
+    return found + reactors
 
 
 def transcript(api, alias, account, messages, want_avatars):
@@ -2497,6 +2534,11 @@ DEMO_DMS = [
      "The staging certificate expires on Friday.", 190, False, 0, "active"),
     ("demo-mpim-0", "priya, dana, tomas", "Dana Okafor", "Thursday works for me.",
      320, False, 0, ""),
+    # No `ago`, so no date: nothing has been said in these lately and the
+    # helper only lists them to pad the section out. A real account has
+    # hundreds of them, and the sidebar folds them behind one row.
+    ("demo-im-3", "Yuki Tanaka", "", "", None, False, 0, "away"),
+    ("demo-im-4", "Tomás Lindqvist", "", "", None, False, 0, ""),
 ]
 
 DEMO_CHANNELS = [
@@ -2522,10 +2564,12 @@ def demo_account(alias):
             "withUserId": "demo-user" if kind == "im" else "",
             "topic": extra if kind == "channel" else "", "purpose": "", "quiet": "",
             "member": True, "lastFrom": who,
-            "lastText": plain_text(text), "when": iso_from_ts(now - ago * 60),
-            "ts": "%.6f" % (now - ago * 60), "unread": unread, "unreadCount": count,
+            "lastText": plain_text(text),
+            "when": iso_from_ts(now - ago * 60) if ago is not None else "",
+            "ts": ("%.6f" % (now - ago * 60)) if ago is not None else "",
+            "unread": unread, "unreadCount": count,
             "presence": ({"state": extra, "activity": ""} if kind == "im" and extra else None),
-            "avatar": "", "current": True,
+            "avatar": "", "current": ago is not None,
         }
 
     dms = [row("im" if channel_id.startswith("demo-im") else "mpim",
@@ -2554,6 +2598,10 @@ def demo_account(alias):
 # picture of a chat window wants a conversation with some shape to it - turns
 # of different lengths, both sides of it, a thread, a link, a reaction - which
 # two lines of "Looking now." does not have.
+# Who the demo says reacted, so a chip in a showcase picture has a name list
+# to show under the pointer like a real one does.
+DEMO_REACTORS = ["Ana Beltrán", "Priya Raman", "Tomás Lindqvist", "Yuki Tanaka"]
+
 DEMO_TRANSCRIPTS = {
     "demo-channel-0": [
         ("Tomás Lindqvist", "t1", 34, "Rolling back the 14:02 release. Staging is red and I would "
@@ -2604,7 +2652,9 @@ def demo_messages(channel, thread=""):
             "edited": index == 2 and not thread, "system": False, "mine": who_id == "demo-me",
             "images": [], "files": [],
             "reactions": [{"name": name, "emoji": emoji_table.char_for(name) or name,
-                           "count": count, "mine": mine} for name, count, mine in reactions],
+                           "count": count, "mine": mine,
+                           "who": (["You"] if mine else []) + DEMO_REACTORS[:count - (1 if mine else 0)]}
+                          for name, count, mine in reactions],
             "threadTs": stamp if replies else "", "replyCount": replies, "replyUsers": replies,
             "latestReply": "", "latestReplyTs": "", "parent": bool(replies), "pinned": False,
             # A demo thread is one you follow with something new in it, so the

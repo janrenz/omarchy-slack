@@ -321,7 +321,16 @@ Item {
   // helper wants. decodeURIComponent because a space arrives as %20, and it is
   // a path on this machine either way.
   function sendFile(fileUrl) {
-    var path = decodeURIComponent(String(fileUrl || "").replace(/^file:\/\//, ""))
+    var url = String(fileUrl || "").trim()
+    if (url === "") return
+    // A drag carries whatever had a URL. Dropping a link out of a browser is
+    // still text/uri-list, and a path that was never a path is a confusing
+    // way for the helper to fail - so it is turned away here, by name.
+    if (url.indexOf("file://") !== 0 && url.charAt(0) !== "/") {
+      service.uploadError = "Only a file on this machine can be sent, not a link"
+      return
+    }
+    var path = decodeURIComponent(url.replace(/^file:\/\//, ""))
     if (path === "") return
     service.uploadFile(path)
   }
@@ -505,6 +514,25 @@ Item {
                                             itemY + itemHeight + margin - flick.height))
   }
 
+  // What picking a row in the sidebar does. Both lists - the sidebar and the
+  // drawer the narrow layout puts it in - come through here, because they draw
+  // the same rows and a row that unfolds the quiet direct messages has to mean
+  // the same thing in either.
+  function pickListRow(row) {
+    if (!row) return
+    if (String(row.kind || "") === "more") {
+      // Not something to open. The list grows or shrinks under the pointer and
+      // the drawer stays where it is, because the person is still choosing.
+      service.showAllDms = !service.showAllDms
+      return
+    }
+    service.openConversationRow(row, "")
+    // Opening something is a step inwards: the keys should now be driving what
+    // was opened, not the list behind it.
+    root.listDrawerOpen = false
+    if (service.reading) root.focusPane = "conversation"
+  }
+
   // Back to the conversation, with the draft left exactly as it is. The key
   // catcher is stood down while the composer has focus - it claims bare
   // letters - so this is the only way back to the keyboard without the mouse.
@@ -549,10 +577,26 @@ Item {
       // screen. Anywhere, rather than on the transcript alone: aiming at a
       // scrolling list is a worse target than a window, and there is only ever
       // one conversation open to mean.
+      //
+      // Deliberately not switched off when the token cannot send files, when
+      // nothing is open, or while another file is on its way up. A window that
+      // ignores a drop looks broken, and a token without files:write is the
+      // usual reason a drop appears to do nothing at all: this way the overlay
+      // says which of those it is while the file is still in the air, and
+      // uploadFile() says it again on the line under the composer.
       DropArea {
+        id: fileDrop
         anchors.fill: parent
         keys: ["text/uri-list"]
-        enabled: service.canUpload && !!service.openConversation && !service.uploading
+
+        // Empty when a drop would go through. Otherwise why it would not.
+        readonly property string refusal: {
+          if (!service.openConversation) return "Open a conversation to send a file into"
+          if (!service.canUpload) return "This token cannot send files - add files:write in Settings"
+          if (service.uploading) return "Still sending the last file"
+          return ""
+        }
+
         onDropped: function(drop) {
           if (!drop.hasUrls || drop.urls.length === 0) return
           // One at a time. Slack takes several, but each is three requests and
@@ -562,22 +606,29 @@ Item {
           drop.acceptProposedAction()
         }
 
-        // While something is over the window, say what letting go would do.
+        // While something is over the window, say what letting go would do -
+        // or, when it would do nothing, what is in the way.
         Rectangle {
+          readonly property color tint: fileDrop.refusal === "" ? Color.accent : Color.urgent
+
           anchors.fill: parent
           visible: parent.containsDrag
-          color: Util.alpha(Color.accent, 0.08)
-          border.color: Color.accent
+          color: Util.alpha(tint, 0.08)
+          border.color: tint
           border.width: Math.max(1, Style.space(2))
           radius: Style.cornerRadius
           z: 500
 
           Text {
             anchors.centerIn: parent
-            text: "Drop to send to " + (service.openConversation
-              ? String(service.openConversation.title || "") : "")
+            width: parent.width - Style.spacing.xl * 2
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            text: fileDrop.refusal !== "" ? fileDrop.refusal
+                  : ("Drop to send to " + (service.openConversation
+                     ? String(service.openConversation.title || "") : ""))
             textFormat: Text.PlainText
-            color: Color.accent
+            color: parent.tint
             font.family: Style.font.family
             font.pixelSize: Style.font.body
           }
@@ -682,11 +733,7 @@ Item {
                 fg: Color.foreground
                 accent: Color.accent
                 fontFamily: Style.font.family
-                onPicked: function(row) {
-                  service.openConversationRow(row, "")
-                  root.listDrawerOpen = false
-                  if (service.reading) root.focusPane = "conversation"
-                }
+                onPicked: function(row) { root.pickListRow(row) }
               }
             }
           }
@@ -1331,13 +1378,7 @@ Item {
                   onCursorMoved: function(itemY, itemHeight) {
                     root.ensureVisible(sidebarScroll, itemY, itemHeight)
                   }
-                  onPicked: function(row) {
-                    service.openConversationRow(row, "")
-                    // Opening something is a step inwards: the keys should now
-                    // be driving what was opened, not the list behind it.
-                    root.listDrawerOpen = false
-                    if (service.reading) root.focusPane = "conversation"
-                  }
+                  onPicked: function(row) { root.pickListRow(row) }
                 }
               }
             }
