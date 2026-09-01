@@ -30,6 +30,7 @@ Column {
     ["t", "Open the thread on the message under the cursor", "Doing"],
     ["e or +", "React to the message under the cursor", "Doing"],
     ["1 - 9", "Pick that reaction, or take yours back", "Doing"],
+    ["s / o", "In a picture: save a copy / open it elsewhere", "Doing"],
     ["Shift+Enter", "Send what you have typed", "Doing"],
     ["n or Ctrl-k", "Jump to any channel or person", "Doing"],
     ["/", "Search every message", "Doing"],

@@ -24,6 +24,7 @@ of their own.
 - **Reactions**, counted, with yours marked — click a chip to add or remove
   yours. Keyboard first: `j`/`k` walk the transcript, `e` opens the picker on
   the message under the cursor, `1`–`9` pick.
+- **A picture opens in the window**, whole rather than cropped to the thumbnail, with **Save as…** to keep a copy — a real save dialog, starting in your Downloads folder and suggesting a name from what the message called the picture. `s` saves, `o` hands it to whatever else views images, `Escape` closes.
 - **Mentions, channel links, emoji, pictures and files**, all resolved:
   `<@U024BE7LH>` becomes a name, `:tada:` becomes 🎉, an image is drawn inline,
   anything else is a chip that opens where the file already lives.
@@ -221,6 +222,7 @@ focus".
 | `t` | Open the thread on the message under the cursor |
 | `e` or `+` | React to that message. Again, or `Escape`, closes the picker |
 | `1` – `9` | Pick that reaction. The one you already gave takes it back |
+| `s` / `o` | In a picture: save a copy / open it elsewhere |
 | `Shift+Enter` or `Ctrl+Enter` | Send. Plain `Enter` is a newline |
 | `n`, or `Ctrl-k` | Jump to any channel or person — `Ctrl-k` works from inside the message box too |
 | `/` | Search every message |

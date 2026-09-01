@@ -111,6 +111,24 @@ Item {
   // rather than tracked.
   property string focusPane: "list"
   property bool showHelp: false
+
+  // ---- the picture being looked at ----------------------------------------
+  //
+  // A layer of the window rather than a handoff. Empty when nothing is open.
+  property string viewingImagePath: ""
+  property string viewingImageAlt: ""
+  readonly property bool viewingImage: viewingImagePath !== ""
+
+  function viewImage(path, alt) {
+    if (!path) return
+    viewingImagePath = String(path)
+    viewingImageAlt = String(alt || "")
+  }
+
+  function closeImage() {
+    viewingImagePath = ""
+    viewingImageAlt = ""
+  }
   property bool showSettings: false
   property bool showSwitcher: false
   property bool showSearch: false
@@ -304,6 +322,8 @@ Item {
   // than one. A picture is not in this list: it opens in its own window, so
   // closing that closes the picture and leaves Slack alone.
   function dismiss() {
+    // Outermost layer on screen, so the first thing Escape takes back.
+    if (viewingImage) { closeImage(); return }
     if (showHelp) { showHelp = false; return }
     if (showSwitcher) { closeSwitcher(); return }
     if (showSearch) { closeSearch(); return }
@@ -503,6 +523,25 @@ Item {
         }
       }
 
+      // A picture, opened from the transcript. Built when it is wanted rather
+      // than kept hidden, so a conversation full of photographs is not a stack
+      // of decoded full-size images sitting behind the window.
+      Loader {
+        id: imageLayer
+        anchors.fill: parent
+        active: root.viewingImage
+        z: 105
+
+        sourceComponent: ImageViewer {
+          path: root.viewingImagePath
+          alt: root.viewingImageAlt
+          fg: Color.foreground
+          accent: Color.accent
+          fontFamily: Style.font.family
+          onCloseRequested: root.closeImage()
+        }
+      }
+
       // The keyboard, listed. Over everything, because ? works from anywhere.
       Item {
         anchors.fill: parent
@@ -595,6 +634,13 @@ Item {
         onTabRequested: root.focusComposer()
         onTextKey: function(text) {
           var view = root.scrollTarget()
+          // A picture is over everything, so it takes the keys while it is up.
+          if (root.viewingImage) {
+            if (!imageLayer.item) return
+            if (text === "s") imageLayer.item.save()
+            else if (text === "o") imageLayer.item.openExternally()
+            return
+          }
           // While the picker is open the digits are the choices, and nothing
           // else should be acting on the conversation behind it.
           if (root.pickingMessageId !== "") {
@@ -1528,6 +1574,7 @@ Item {
 
                                   delegate: MessageImage {
                                     required property var modelData
+                                    onOpenRequested: function(path, alt) { root.viewImage(path, alt) }
                                     url: String(modelData.url || "")
                                     alt: String(modelData.alt || "")
                                     intrinsicWidth: Number(modelData.width || 0)
