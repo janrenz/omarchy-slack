@@ -549,6 +549,39 @@ def save_marks(alias, marks, seen):
                 "seen": dict(list(seen.items())[-500:])})
 
 
+def load_thread_marks(alias):
+    return (read_json(cache_path(alias, "threads.json"), None) or {}).get("marks") or {}
+
+
+def save_thread_marks(alias, marks):
+    # Bounded like marks.json, and worth no more than what it saves the next
+    # time a channel is read.
+    write_json(cache_path(alias, "threads.json"),
+               {"marks": dict(list(marks.items())[-500:])})
+
+
+def apply_thread_marks(alias, channel, rows):
+    """Take the unread mark off threads that were read in this window.
+
+    Slack has no API for marking a thread read - `conversations.mark` is the
+    channel's mark and there is nothing else - so a thread read here would keep
+    saying "new" until it was read again in a Slack client, which is worse than
+    not saying it at all. What was read here is remembered on this machine
+    instead, and only ever *clears* a mark: nothing local can make a thread
+    unread that Slack says is read.
+    """
+    marks = load_thread_marks(alias)
+    if not marks:
+        return rows
+    for row in rows:
+        if not row.get("threadUnread"):
+            continue
+        mark = marks.get("%s:%s" % (channel, row.get("threadTs") or ""), "")
+        if mark and not newer(row.get("latestReplyTs"), mark):
+            row["threadUnread"] = False
+    return rows
+
+
 def newer(left, right):
     """Slack timestamps compare as numbers, not as strings.
 
@@ -1060,6 +1093,24 @@ def message_row(message, users, channels, me_id, avatars=None):
         "replyCount": int(message.get("reply_count") or 0),
         "replyUsers": int(message.get("reply_users_count") or 0),
         "latestReply": iso_from_ts(message.get("latest_reply")) if message.get("latest_reply") else "",
+        # Whether this thread has something in it you have not read.
+        #
+        # Slack answers that for a thread you are subscribed to and for no
+        # other: `subscribed` says you follow it - you replied, or pressed
+        # Follow - `last_read` is how far you got, and `latest_reply` is how far
+        # the thread has got. A thread nobody subscribed to is not unread in
+        # Slack's own reckoning either, so this claims nothing about those.
+        #
+        # There is no unread *count* anywhere in the payload, only the fact, so
+        # the fact is all the window is given. Verified against a real
+        # workspace: parents come back with subscribed/last_read/latest_reply
+        # and never with an unread_count.
+        "subscribed": bool(message.get("subscribed")),
+        "lastRead": str(message.get("last_read") or ""),
+        "latestReplyTs": str(message.get("latest_reply") or ""),
+        "threadUnread": (bool(message.get("subscribed"))
+                         and bool(message.get("last_read"))
+                         and newer(message.get("latest_reply"), message.get("last_read"))),
         "parent": bool(message.get("thread_ts")) and str(message.get("thread_ts")) == str(message.get("ts")),
         "pinned": bool(message.get("pinned_to")),
     }
@@ -1725,7 +1776,8 @@ def cmd_messages(args):
                  "it makes you wait. Give it a moment and press r.")
         fail("messages_failed", friendly(code))
 
-    rows = transcript(api, args.account, account, messages, args.avatars)
+    rows = apply_thread_marks(args.account, args.channel,
+                              transcript(api, args.account, account, messages, args.avatars))
     out({
         "ok": True,
         "channel": args.channel,
@@ -1734,6 +1786,23 @@ def cmd_messages(args):
         "hasMore": bool(payload.get("has_more")),
         "messages": rows,
     })
+
+
+def cmd_thread_read(args):
+    """Remember that a thread was read here. Nothing is sent to Slack.
+
+    There is no Slack method for a thread's read mark, so this writes to
+    threads.json and apply_thread_marks reads it back. It cannot mark anything
+    unread and it cannot affect any other client.
+    """
+    if args.demo:
+        out({"ok": True, "thread": args.ts, "upto": str(args.upto or args.ts), "local": True})
+
+    load_account(args.account)
+    marks = load_thread_marks(args.account)
+    marks["%s:%s" % (args.channel, args.ts)] = str(args.upto or args.ts)
+    save_thread_marks(args.account, marks)
+    out({"ok": True, "thread": args.ts, "upto": str(args.upto or args.ts), "local": True})
 
 
 def cmd_send(args):
@@ -2537,7 +2606,12 @@ def demo_messages(channel, thread=""):
             "reactions": [{"name": name, "emoji": emoji_table.char_for(name) or name,
                            "count": count, "mine": mine} for name, count, mine in reactions],
             "threadTs": stamp if replies else "", "replyCount": replies, "replyUsers": replies,
-            "latestReply": "", "parent": bool(replies), "pinned": False,
+            "latestReply": "", "latestReplyTs": "", "parent": bool(replies), "pinned": False,
+            # A demo thread is one you follow with something new in it, so the
+            # chip that says so is in the showcase images rather than only in
+            # the code.
+            "subscribed": bool(replies), "lastRead": "",
+            "threadUnread": bool(replies) and not thread,
         })
     return {"ok": True, "channel": channel, "thread": thread or "", "anchored": False,
             "hasMore": False, "messages": messages}
@@ -2636,6 +2710,14 @@ def main():
     mark.add_argument("--ts", required=True)
     mark.add_argument("--demo", action="store_true")
     mark.set_defaults(func=cmd_mark_read)
+
+    thread_read = with_account("thread-read",
+                               "remember locally that a thread was read - Slack has no method for it")
+    thread_read.add_argument("--channel", required=True)
+    thread_read.add_argument("--ts", required=True, help="the thread's parent ts")
+    thread_read.add_argument("--upto", help="the newest reply that was read; defaults to the parent")
+    thread_read.add_argument("--demo", action="store_true")
+    thread_read.set_defaults(func=cmd_thread_read)
 
     open_dm = with_account("open-dm", "open a direct message")
     open_dm.add_argument("--user", action="append", required=True,

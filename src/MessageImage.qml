@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Widgets
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -37,6 +38,9 @@ Item {
   readonly property real drawHeight: Math.min(maxHeight, drawWidth * ratio)
 
   property string path: ""
+  // The picture's load state, kept here because the Image itself lives in a
+  // Component below and cannot be reached by id from the rows that ask.
+  property int pictureStatus: Image.Null
   property string problem: ""
   property bool loading: false
 
@@ -78,23 +82,52 @@ Item {
     border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
     clip: true
 
-    Image {
-      id: picture
+    // The picture, clipped to the corners above rather than to the box they
+    // are cut out of: `clip: true` on a Rectangle clips children to its
+    // bounding box and not to its radius, so a photograph came out square
+    // inside a rounded frame. Only the picture goes inside the
+    // ClippingRectangle - its render pass hides what it wraps from the input
+    // system, so the MouseArea below has to stay out of it.
+    //
+    // The software scene graph cannot draw that render pass at all, and would
+    // drop the picture rather than square it. That is what the offscreen
+    // harness runs on, so there the plain Image stands in.
+    readonly property bool canRoundPictures: GraphicsInfo.api !== GraphicsInfo.Software
+
+    Loader {
       anchors.fill: parent
-      source: root.path !== "" ? "file://" + root.path : ""
-      fillMode: Image.PreserveAspectCrop
-      asynchronous: true
-      cache: true
-      // The full-size picture can be thousands of pixels; decoding it at the
-      // size actually drawn keeps a transcript of photographs from eating
-      // hundreds of megabytes in the shell process.
-      sourceSize.width: Math.round(root.drawWidth * 2)
-      visible: status === Image.Ready
+      sourceComponent: canRoundPictures ? roundedPicture : picture
+    }
+
+    Component {
+      id: roundedPicture
+      ClippingRectangle {
+        color: "transparent"
+        radius: Style.space(5)
+        Loader { anchors.fill: parent; sourceComponent: picture }
+      }
+    }
+
+    Component {
+      id: picture
+      Image {
+        source: root.path !== "" ? "file://" + root.path : ""
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+        cache: true
+        // The full-size picture can be thousands of pixels; decoding it at the
+        // size actually drawn keeps a transcript of photographs from eating
+        // hundreds of megabytes in the shell process.
+        sourceSize.width: Math.round(root.drawWidth * 2)
+        visible: status === Image.Ready
+        onStatusChanged: root.pictureStatus = status
+        Component.onCompleted: root.pictureStatus = status
+      }
     }
 
     Spinner {
       anchors.centerIn: parent
-      visible: root.loading || (root.path !== "" && picture.status === Image.Loading)
+      visible: root.loading || (root.path !== "" && root.pictureStatus === Image.Loading)
       color: Color.accent
       dotSize: Style.space(4)
     }
@@ -102,7 +135,7 @@ Item {
     Text {
       anchors.centerIn: parent
       width: parent.width - Style.spacing.lg
-      visible: root.problem !== "" || picture.status === Image.Error
+      visible: root.problem !== "" || root.pictureStatus === Image.Error
       text: root.problem !== "" ? root.problem : "Could not show this image"
       textFormat: Text.PlainText
       horizontalAlignment: Text.AlignHCenter

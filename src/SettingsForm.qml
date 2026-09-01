@@ -320,6 +320,14 @@ Column {
     onClicked: root.change("notify", !(root.current("notify", true) !== false))
   }
 
+  Toggle {
+    width: parent.width
+    label: "Hand a conversation to your coding agent"
+    description: "The a key and the Ask agent button, which open the agent you chose with `omarchy default agent` on the conversation you are reading. It is told which conversation to read and reads it through slack.py; no message text is put on a command line. Off also refuses a draft an agent tries to hand back."
+    checked: root.current("agentHandover", true) !== false
+    onClicked: root.change("agentHandover", !(root.current("agentHandover", true) !== false))
+  }
+
   PanelSeparator { width: parent.width }
 
   // ---------------- saving ----------------

@@ -38,11 +38,45 @@ Item {
   // draws without the shell in the way. Nothing in the plugin uses it.
   readonly property alias floatingWindow: window
 
-  function open(_payloadJson) {
+  function open(payloadJson) {
     closingFromHost = false
     loadSettings()
+    var payload = Model.parseJson(payloadJson, null)
+    if (payload) applyPayload(payload)
     window.visible = true
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  // What the shell may deliver with a summon: a conversation to show - a
+  // clicked notification - and a draft a coding agent wrote. Both have to
+  // survive being applied twice, because the payload queue is drained in a
+  // loop and a toast clicked while the window is already open arrives here
+  // too; and neither may throw away a draft being written into the
+  // conversation that is already on screen.
+  function applyPayload(payload) {
+    var conversation = String(payload.conversation || "")
+    if (conversation !== "") {
+      var message = String(payload.message || "")
+      var switching = !service.openConversation
+                      || String(service.openConversation.id) !== conversation
+      // A message older than the last screenful would not be there to reveal,
+      // so the transcript is anchored on it - the route a search result takes.
+      // Only when actually switching: re-anchoring the conversation already on
+      // screen would re-read it on every click of the same notification, and
+      // would take the reader back down to it after they had scrolled away.
+      if (switching) service.openById(conversation, "", "", message)
+      var thread = String(payload.thread || "")
+      if (thread !== "" && String(service.threadTs) !== thread)
+        service.openThread(thread, null)
+      if (message !== "") {
+        cursorMessageId = message
+        focusPane = "conversation"
+      }
+    }
+    if (payload.draft) {
+      agentDraftPending = payload.draft
+      flushAgentDraft()
+    }
   }
 
   function close() {
@@ -60,6 +94,8 @@ Item {
   // The window is one per plugin and the widget owns the configuration, so the
   // window reads it out of shell.json rather than having any of its own.
   property var settings: ({})
+  // A draft that came in before the settings did has been waiting for them.
+  onSettingsChanged: flushAgentDraft()
   property bool settingsLoaded: false
   property string settingsError: ""
 
@@ -113,15 +149,6 @@ Item {
   // rather than tracked.
   property string focusPane: "list"
   property bool showHelp: false
-
-  // A file:// URL from either route - the chooser or a drop - as the path the
-  // helper wants. decodeURIComponent because a space arrives as %20, and it is
-  // a path on this machine either way.
-  function sendFile(fileUrl) {
-    var path = decodeURIComponent(String(fileUrl || "").replace(/^file:\/\//, ""))
-    if (path === "") return
-    service.uploadFile(path)
-  }
 
   // ---- the picture being looked at ----------------------------------------
   //
@@ -258,6 +285,86 @@ Item {
     var parent = String(row.threadTs || "") !== "" ? String(row.threadTs) : String(row.ts)
     service.openThread(parent, row)
     focusPane = "conversation"
+  }
+
+  // ---- the coding agent ---------------------------------------------------
+  //
+  // Omarchy's own handover, pointed at a conversation: omarchy-agent starts
+  // whichever agent was chosen with `omarchy default agent`, and handover.sh
+  // writes the prompt. Nothing anybody said goes into that prompt - the agent
+  // is told which conversation to read and reads it through slack.py, the same
+  // helper this window uses. src/handover.sh says why.
+  // Split from askAgent so the development harness can read back what would be
+  // handed over without an agent actually starting. Empty means there is
+  // nothing to hand over, or the setting says not to.
+  function agentArgv() {
+    if (!service.agentHandover || !service.reading) return []
+    var conversation = service.openConversation
+    if (!conversation) return []
+    var argv = [pluginDir + "/handover.sh",
+                "--account", service.alias,
+                "--channel", String(conversation.id),
+                "--title", String(conversation.title || "")]
+    if (service.inThread) argv = argv.concat(["--thread", String(service.threadTs)])
+    var row = cursoredMessage()
+    if (row && String(row.ts || "") !== "") argv = argv.concat(["--message", String(row.ts)])
+    return argv
+  }
+
+  function askAgent() {
+    var argv = agentArgv()
+    if (argv.length === 0) return
+    Quickshell.execDetached(argv)
+  }
+
+  // A file:// URL from either route - the chooser or a drop - as the path the
+  // helper wants. decodeURIComponent because a space arrives as %20, and it is
+  // a path on this machine either way.
+  function sendFile(fileUrl) {
+    var path = decodeURIComponent(String(fileUrl || "").replace(/^file:\/\//, ""))
+    if (path === "") return
+    service.uploadFile(path)
+  }
+
+  // A draft an agent wrote, arriving from outside:
+  //   omarchy-shell shell summon janrenz.omarchy.slack '{"draft":{...}}'
+  //   omarchy-shell shell call   janrenz.omarchy.slack agentDraft '{...}'
+  // It lands in the message box, focused and unsent. Sending stays a keypress
+  // a person makes, which is the whole reason this is a draft and not a send.
+  property var agentDraftPending: null
+
+  function agentDraft(argJson) {
+    var payload = Model.parseJson(argJson, null)
+    if (!payload) return "bad-json"
+    agentDraftPending = payload.draft ? payload.draft : payload
+    return flushAgentDraft()
+  }
+
+  // Held rather than applied when it arrives before the settings do: the
+  // setting is what says whether a draft may be taken at all, and on the first
+  // open it is still being read out of shell.json.
+  function flushAgentDraft() {
+    if (!agentDraftPending) return "ok"
+    if (!settingsLoaded) return "waiting"
+    if (!service.agentHandover) { agentDraftPending = null; return "off" }
+    var draft = agentDraftPending
+    agentDraftPending = null
+    var text = String(draft.text || "")
+    if (text === "") return "empty"
+    var channel = String(draft.channel || "")
+    if (channel !== "") {
+      var kind = String(draft.kind || (channel.charAt(0) === "D" ? "im" : "channel"))
+      service.openById(channel, String(draft.title || ""), kind, "")
+      var thread = String(draft.thread || "")
+      if (thread !== "") service.openThread(thread, null)
+    }
+    // Nowhere to put it. Better to say so to whoever called than to drop the
+    // text into a window that is not reading anything.
+    if (!service.reading) return "no-conversation"
+    service.draft = text
+    focusPane = "conversation"
+    Qt.callLater(function() { root.focusComposer() })
+    return "ok"
   }
 
   // Spacing, as properties rather than service.pad() calls inside each
@@ -477,7 +584,6 @@ Item {
         }
       }
 
-
       // PanelKeyCatcher's vocabulary is Escape, Tab, the arrows, j/k/h/l and
       // Return; Page, Home, End and the control chords are not in it and
       // arrive here instead. AfterItem so the catcher still gets first refusal
@@ -622,6 +728,7 @@ Item {
             anchors.centerIn: parent
             fg: Color.foreground
             fontFamily: Style.font.family
+            agentHandover: service.agentHandover
           }
         }
       }
@@ -714,6 +821,7 @@ Item {
           }
           if (text === "e" || text === "+") root.startPicking()
           else if (text === "t") root.openThreadHere()
+          else if (text === "a") root.askAgent()
           else if (text === "r") service.reloadConversation()
           else if (text === "u") service.unreadOnly = !service.unreadOnly
           else if (text === "m") service.markCurrentRead()
@@ -898,7 +1006,7 @@ Item {
                 // side of it. A bare glyph between two boxes reads as a stray
                 // character rather than as the next control along.
                 bordered: true
-                size: refreshButton.height
+                size: unreadButton.height
                 onClicked: root.showSettings = !root.showSettings
               }
 
@@ -919,8 +1027,14 @@ Item {
               }
 
               Button {
+                // Named because the icon buttons measure themselves against
+                // it; height is computed even while this one is hidden.
+                id: unreadButton
                 visible: service.signedIn && !root.showSettings
-                text: "Unread"
+                // The count belongs on the button that filters by it: "Unread"
+                // alone made you turn the filter on to find out whether it was
+                // worth turning on.
+                text: service.unreadCount > 0 ? "Unread " + service.unreadCount : "Unread"
                 tooltipText: service.unreadOnly
                   ? "Showing only what is unread" : "Show only what is unread"
                 selected: service.unreadOnly
@@ -931,14 +1045,13 @@ Item {
                 onClicked: service.unreadOnly = !service.unreadOnly
               }
 
-              Button {
+              PanelActionButton {
                 visible: service.signedIn && service.canSearch && !root.showSettings
-                text: "Search"
+                iconText: "\u{F0349}"   // nf-md-magnify
                 tooltipText: "Search every message in the workspace  (/)"
-                bordered: true
                 foreground: Color.foreground
-                fontFamily: Style.font.family
-                fontSize: Style.font.caption
+                bordered: true
+                size: unreadButton.height
                 onClicked: root.openSearch()
               }
 
@@ -953,17 +1066,14 @@ Item {
                 onClicked: root.openSwitcher()
               }
 
-              Button {
-                // Named because the settings button measures itself against
-                // it; height is computed even while this one is hidden.
-                id: refreshButton
+              PanelActionButton {
                 visible: service.configured && !root.showSettings
                 enabled: !service.loading
-                text: "Refresh"
-                bordered: true
+                iconText: "\u{F0450}"   // nf-md-refresh
+                tooltipText: "Read the workspace again"
                 foreground: Color.foreground
-                fontFamily: Style.font.family
-                fontSize: Style.font.caption
+                bordered: true
+                size: unreadButton.height
                 onClicked: service.refreshEverything()
               }
             }
@@ -1600,23 +1710,34 @@ Item {
                                 // a channel that only showed the parents would
                                 // be showing half of it.
                                 Rectangle {
+                                  // Something in this thread has not been read.
+                                  // Slack says so only for a thread you follow
+                                  // and never how much of it is new, so the
+                                  // chip fills in and says "new" rather than
+                                  // carrying a count it would have to invent.
+                                  readonly property bool threadUnread:
+                                    line.modelData.threadUnread === true
+
                                   visible: !service.inThread
                                            && Number(line.modelData.replyCount || 0) > 0
                                   implicitWidth: replies.implicitWidth + Style.spacing.lg
                                   implicitHeight: replies.implicitHeight + Style.spacing.xs * 2
                                   radius: height / 2
                                   color: threadPointer.containsMouse
-                                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                                    : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.26)
+                                    : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b,
+                                              threadUnread ? 0.20 : 0.10)
 
                                   Text {
                                     id: replies
                                     anchors.centerIn: parent
-                                    text: Model.threadLabel(line.modelData.replyCount) + "  ›"
+                                    text: Model.threadLabel(line.modelData.replyCount,
+                                                            line.modelData.threadUnread) + "  ›"
                                     textFormat: Text.PlainText
                                     color: Color.accent
                                     font.family: Style.font.family
                                     font.pixelSize: Style.font.caption
+                                    font.bold: parent.threadUnread
                                   }
 
                                   MouseArea {
@@ -1836,6 +1957,20 @@ Item {
                     fontFamily: Style.font.family
                     fontSize: Style.font.caption
                     onClicked: service.reloadConversation()
+                  }
+
+                  // The same handover the a key does. Gone entirely when the
+                  // setting is off, rather than disabled: a button that cannot
+                  // ever do anything is worse than no button.
+                  Button {
+                    visible: service.agentHandover
+                    text: "Ask agent"
+                    tooltipText: "Open your coding agent on this conversation"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: root.askAgent()
                   }
 
                   Text {

@@ -40,6 +40,7 @@
       "avatars": true,
       "presence": true,
       "notify": true,
+      "agentHandover": true,
       "density": "cosy"
     },
     "schema": [
@@ -144,6 +145,13 @@
         "type": "boolean",
         "label": "Notify when a message arrives",
         "description": "A desktop notification for each conversation that has something new in it. What was already waiting when the shell started is not announced, and neither is anything you sent yourself.",
+        "defaultValue": true
+      },
+      {
+        "key": "agentHandover",
+        "type": "boolean",
+        "label": "Hand a conversation to your coding agent",
+        "description": "Adds the a key and an Ask agent button, which open the coding agent you chose in Omarchy on the conversation you are reading. No message text leaves the window - the agent is told which conversation to read and reads it through the same helper this window uses. Off means neither the key nor the button is there, and a draft sent back from an agent is refused.",
         "defaultValue": true
       }
     ]

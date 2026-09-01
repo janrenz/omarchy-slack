@@ -24,6 +24,10 @@ Item {
   readonly property bool notifyOnNew: setting("notify", true) !== false
   readonly property bool wantAvatars: setting("avatars", true) !== false
   readonly property bool wantPresence: setting("presence", true) !== false
+  // Whether the coding-agent handover is on offer at all. Off takes away the a
+  // key, the button, and the route an agent uses to hand a draft back - see the
+  // README's "Your coding agent" section.
+  readonly property bool agentHandover: setting("agentHandover", true) !== false
   readonly property bool demo: setting("demo", false) === true
 
   // The bar draws a count and nothing else. Faces and presence are one request

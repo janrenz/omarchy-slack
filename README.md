@@ -12,9 +12,11 @@ of their own.
   counts, previews and faces — all of it from one search per poll rather than
   one request per conversation, because Slack does not allow the latter (see
   below; it is the most interesting thing about this plugin).
-- **Threads.** The part of Slack where half the conversation actually happens.
-  A message with replies wears a chip saying how many; opening it is a view of
-  its own, `Esc` comes back, and a reply can be sent to the channel as well.
+- **Threads, and which of them have something new.** The part of Slack where
+  half the conversation actually happens. A message with replies wears a chip
+  saying how many — and the chip fills in and reads **`4 replies · new`** when
+  that thread has something you have not read. Opening it is a view of its own,
+  `Esc` comes back, and a reply can be sent to the channel as well.
 - **Jump to anything** — `n`, or `Ctrl-k` from anywhere, including out of the
   message box. Your conversations first, then every channel in the workspace
   (Enter joins one you are not in), then every person (Enter opens a DM). This
@@ -208,7 +210,6 @@ an id and a URL, the bytes go to that URL, and a third call puts the file in the
 conversation. If that third call fails the file exists and nobody can see it,
 and the plugin says exactly that rather than calling it a failure.
 
-
 ## Keyboard
 
 Press `?` in the window for this same list. Omarchy is keyboard-first, so the
@@ -243,6 +244,7 @@ focus".
 | Key | What it does |
 |---|---|
 | `t` | Open the thread on the message under the cursor |
+| `a` | Hand this conversation to your coding agent — see below |
 | `e` or `+` | React to that message. Again, or `Escape`, closes the picker |
 | `1` – `9` | Pick that reaction. The one you already gave takes it back |
 | `s` / `o` | In a picture: save a copy / open it elsewhere |
@@ -280,6 +282,7 @@ is the line that writes it into the registry — so the plugin brings its own.
 | `tintOnUnread` | `true` | Highlight the bar icon while something is unread. |
 | `showCount` | `false` | The number of waiting conversations, beside the icon. |
 | `notify` | `true` | Desktop notification when a conversation has something new in it. |
+| `agentHandover` | `true` | Whether `a` and the **Ask agent** button are there at all, and whether a draft from an agent is accepted. |
 
 ## Notifications
 
@@ -318,6 +321,74 @@ power-saver profile.
 Anything you ask for by hand still goes out, offline included: a failure you can
 see beats a silence you cannot. The bar's tooltip says why nothing is moving
 while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
+
+## Your coding agent
+
+Omarchy already knows which coding agent you use — `omarchy default agent`
+picks one, `omarchy-agent` launches it. Press `a` in a conversation, or the
+**Ask agent** button beside the message box, and that agent opens on the
+conversation you are reading.
+
+What crosses over is a pointer, not a transcript. The prompt names the
+workspace alias, the conversation id, the open thread and the message the
+cursor was on, and points at a skill in `skills/omarchy-slack/`; the agent then
+reads the conversation through `src/slack.py`, the same helper the window uses.
+Two reasons for that. Anyone on this machine can read another process's command
+line, and an agent window lives for hours — so other people's messages have no
+business being in it. And the agent reads what is in the conversation *now*,
+not what happened to be on screen when you pressed the key.
+
+The skill tells it to draft rather than to post. An answer it writes comes back
+into the message box, focused and unsent:
+
+```bash
+omarchy-shell shell summon janrenz.omarchy.slack \
+  '{"draft":{"channel":"C0123","text":"Ich schaue morgen früh drauf."}}'
+```
+
+The window opens if it was closed. Sending stays a keypress you make — nothing
+an agent does here reaches Slack.
+
+`src/handover.sh` is what the key runs, and it is usable on its own: `--print`
+shows the prompt instead of launching anything, which is also how you would
+point a Hyprland binding at a particular channel.
+
+Turn the whole thing off with `agentHandover` in the settings and the key, the
+button and the help entry are gone, and a draft arriving from an agent is
+refused rather than quietly applied.
+
+## Which threads are unread
+
+A message with replies wears a chip. When the thread has something in it you
+have not read, the chip fills in and says so:
+
+```
+4 replies · new  ›          a thread you follow, with something new in it
+4 replies  ›                everything in it has been read
+```
+
+Slack answers this question, but only in one particular way, and the chip is
+shaped by what it actually answers:
+
+- **Only threads you follow.** A thread parent comes back with
+  `subscribed: true` when you replied to it or pressed Follow, and only then
+  does Slack send `last_read` for it. An unfollowed thread is not unread in
+  Slack's own reckoning either, so the chip claims nothing about it.
+- **The fact, never a number.** The payload carries `last_read` and
+  `latest_reply` and no unread count anywhere, so the chip says `new` rather
+  than inventing `2 new`.
+- **The channel you have open, not the sidebar.** The marks ride along in the
+  `conversations.history` response the transcript already fetches, so they cost
+  nothing extra. Marks for every channel at once would need one history request
+  per channel per poll, and Slack allows an app outside its Marketplace about
+  one a minute — the same wall the whole design is built around.
+- **Reading a thread here clears its chip.** Slack has no method for a thread's
+  read mark: `conversations.mark` is the channel's mark and there is nothing
+  else. So what you read here is remembered on this machine, in
+  `~/.cache/omarchy/slack/<workspace>/threads.json`, and that file is only ever
+  allowed to *take a mark off* — nothing local can make a thread look unread
+  that Slack says is read. Read the thread in a real Slack client and the mark
+  goes away on its own.
 
 ## How it knows what is new, and why it is built the way it is
 
@@ -404,7 +475,9 @@ have already read comes back.
   earlier poll, for the same reason.
 - **A thread reply does not bump its channel.** Slack counts threads apart from
   channels, and so does this: `conversations.history` does not return a reply
-  unless the sender ticked "also send to channel".
+  unless the sender ticked "also send to channel". So the sidebar's unread mark
+  is about the channel, and the thread chips inside it are about the threads —
+  see below for why there can be no sidebar mark for a thread.
 - **One workspace per install.** The window is one per plugin, and the widget
   is `allowMultiple: false`. Two workspaces would be two sidebars fighting over
   one window.

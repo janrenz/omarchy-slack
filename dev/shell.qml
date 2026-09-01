@@ -156,6 +156,23 @@ ShellRoot {
 
 
 
+    // The coding-agent handover, without an agent starting: the argv the window
+    // would run, so a script can check what it points at and that the setting
+    // actually turns it off.
+    function handover(): string {
+      return JSON.stringify(panel.agentArgv())
+    }
+
+    // The other direction - a draft coming back from an agent, as the shell
+    // would deliver it. Returns what the window made of it.
+    function draft(json: string): string {
+      return String(panel.agentDraft(json))
+    }
+
+    function handovers(on: bool): void {
+      panel.settings = Object.assign({}, panel.settings, { agentHandover: on })
+    }
+
     // Out of a thread and back to the conversation it hangs off.
     function back(): void {
       panel.slackService.closeThread()
@@ -178,6 +195,25 @@ ShellRoot {
                      + (child.source !== undefined ? " src=" + child.source : "")
                      + " visible=" + child.visible
                      + (child.text !== undefined ? " text=" + String(child.text).substring(0, 24) : ""))
+          walk(child, depth + 1)
+        }
+      }
+      var content = panel.floatingWindow ? panel.floatingWindow.contentItem : null
+      walk(content && content.children.length ? content.children[0] : content, 0)
+      return out.join("\n")
+    }
+
+    // Every piece of text on screen that mentions something, with whether it
+    // is actually visible - for checking that a row exists in a pane too long
+    // to photograph in one screenful.
+    function texts(needle: string): string {
+      var out = []
+      function walk(item, depth) {
+        if (!item || depth > 20) return
+        for (var i = 0; i < item.children.length; i++) {
+          var child = item.children[i]
+          if (child.text !== undefined && String(child.text).indexOf(needle) >= 0)
+            out.push((child.visible ? "visible: " : "hidden:  ") + String(child.text).substring(0, 80))
           walk(child, depth + 1)
         }
       }

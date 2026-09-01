@@ -374,6 +374,26 @@ test("replies are counted in words", () => {
   eq(Model.threadLabel(4), "4 replies")
 })
 
+test("a thread with something new in it says so, without inventing a number", () => {
+  eq(Model.threadLabel(4, true), "4 replies · new")
+  eq(Model.threadLabel(1, true), "1 reply · new")
+  // Unread is meaningless without replies, and false must read as read.
+  eq(Model.threadLabel(0, true), "")
+  eq(Model.threadLabel(4, false), "4 replies")
+  eq(Model.threadLabel(4, "yes"), "4 replies")
+})
+
+test("the transcript carries a thread's unread mark to the chip", () => {
+  const groups = Model.groupMessages([
+    t({ id: "1", ts: "1", replyCount: 3, threadTs: "1", parent: true, threadUnread: true }),
+    t({ id: "2", ts: "2", fromId: "U2", from: "Ana", replyCount: 2, threadTs: "2", parent: true })
+  ], "me", now)
+  const lines = groups.reduce((all, group) => all.concat(group.lines), [])
+  eq(lines[0].threadUnread, true)
+  // Absent means read, not undefined: the chip binds straight to this.
+  eq(lines[1].threadUnread, false)
+})
+
 test("a file says what it is and how big", () => {
   eq(Model.fileLabel({ kind: "PDF", size: 0 }), "PDF")
   eq(Model.fileLabel({ kind: "PDF", size: 900 }), "PDF · 900 B")

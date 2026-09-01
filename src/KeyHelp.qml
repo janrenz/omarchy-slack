@@ -12,6 +12,9 @@ Column {
   property color fg: Color.foreground
   property color dim: Qt.darker(fg, 1.5)
   property string fontFamily: Style.font.family
+  // The a key is only there when the handover setting is on, so the list must
+  // not promise it either.
+  property bool agentHandover: true
 
   // [key, what it does, which section]
   readonly property var bindings: [
@@ -28,6 +31,7 @@ Column {
     ["g / G", "To the top / to the newest", "Scrolling"],
 
     ["t", "Open the thread on the message under the cursor", "Doing"],
+    ["a", "Hand this conversation to your coding agent", "Doing"],
     ["e or +", "React to the message under the cursor", "Doing"],
     ["1 - 9", "Pick that reaction, or take yours back", "Doing"],
     ["s / o", "In a picture: save a copy / open it elsewhere", "Doing"],
@@ -63,7 +67,9 @@ Column {
       PanelSectionHeader { width: Style.space(440); text: parent.modelData }
 
       Repeater {
-        model: root.bindings.filter(function(row) { return row[2] === modelData })
+        model: root.bindings.filter(function(row) {
+          return row[2] === modelData && (root.agentHandover || row[0] !== "a")
+        })
 
         delegate: Row {
           required property var modelData

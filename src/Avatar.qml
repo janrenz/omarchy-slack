@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell.Widgets
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -32,6 +33,12 @@ Item {
   width: size
   height: size
 
+  // Whether the picture is up, so the letters underneath get out of its way.
+  // Held here rather than read off the Image, because the picture lives in a
+  // Loader that does not exist until there is one to draw.
+  property bool pictureReady: false
+  onPathChanged: pictureReady = false
+
   readonly property string initials: {
     var words = String(name || "").replace(/^[#@]/, "").trim().split(/\s+/)
     if (words.length === 0 || words[0] === "") return "?"
@@ -39,16 +46,17 @@ Item {
     return (words[0].substring(0, 1) + words[words.length - 1].substring(0, 1)).toUpperCase()
   }
 
+  // A face is a circle; a channel's glyph is a rounded square, because a
+  // channel is not a person and should not look like one.
   Rectangle {
     id: plate
     anchors.fill: parent
     radius: root.glyph !== "" ? Style.space(4) : width / 2
     color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.10)
-    clip: true
 
     Text {
       anchors.centerIn: parent
-      visible: picture.status !== Image.Ready
+      visible: !root.pictureReady
       text: root.glyph !== "" ? root.glyph : root.initials
       textFormat: Text.PlainText
       color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.75)
@@ -56,10 +64,44 @@ Item {
       font.pixelSize: Math.max(Style.font.caption, root.size * 0.42)
       font.bold: root.glyph === ""
     }
+  }
 
+  // The picture, in a shape of its own.
+  //
+  // `clip: true` on the plate above will not do it: a Rectangle clips its
+  // children to its bounding box and not to its corners, so a photograph came
+  // out square inside a round plate. ClippingRectangle clips to the corners
+  // properly, at the cost of a render pass each - hence the Loader, since
+  // letters and glyphs are most of a sidebar and need none of it.
+  //
+  // That render pass is a ShaderEffect, and the software scene graph cannot
+  // draw one: under it the picture would be missing altogether rather than
+  // merely square. That is what this plugin's offscreen harness runs on -
+  // QT_QPA_PLATFORM=offscreen forces the software backend whatever
+  // QSG_RHI_BACKEND says - so there the picture is drawn plainly and a face is
+  // square again, which is the right thing to degrade to.
+  readonly property bool canRoundPictures: GraphicsInfo.api !== GraphicsInfo.Software
+
+  Loader {
+    anchors.fill: parent
+    active: root.path !== ""
+    sourceComponent: root.canRoundPictures ? roundedPicture : picture
+  }
+
+  Component {
+    id: roundedPicture
+    ClippingRectangle {
+      color: "transparent"
+      radius: plate.radius
+      // The picture itself is declared once, below; a Component carries the
+      // scope it was declared in, so `root` still means the avatar in there.
+      Loader { anchors.fill: parent; sourceComponent: picture }
+    }
+  }
+
+  Component {
+    id: picture
     Image {
-      id: picture
-      anchors.fill: parent
       source: root.path !== "" ? "file://" + root.path : ""
       fillMode: Image.PreserveAspectCrop
       asynchronous: true
@@ -70,6 +112,8 @@ Item {
       sourceSize.width: Math.round(root.size * 2)
       sourceSize.height: Math.round(root.size * 2)
       visible: status === Image.Ready
+      onStatusChanged: root.pictureReady = (status === Image.Ready)
+      Component.onCompleted: root.pictureReady = (status === Image.Ready)
     }
   }
 

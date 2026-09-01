@@ -561,10 +561,14 @@ function fileLabel(row) {
   return kind + " · " + (Math.round(size / 1024 / 102.4) / 10) + " MB"
 }
 
-function threadLabel(count) {
+function threadLabel(count, unread) {
   var n = Number(count || 0)
   if (n <= 0) return ""
-  return n === 1 ? "1 reply" : n + " replies"
+  var label = n === 1 ? "1 reply" : n + " replies"
+  // The fact, not a number: Slack sends whether a thread you follow has
+  // something new in it and never how much of it is new, so a count here would
+  // be invented. See slack.py's message_row.
+  return unread === true ? label + " · new" : label
 }
 
 // Consecutive messages from one person are one block: repeating the name on
@@ -587,6 +591,7 @@ function groupMessages(messages, meId, now) {
       reactions: message.reactions || [],
       threadTs: String(message.threadTs || ""),
       replyCount: Number(message.replyCount || 0),
+      threadUnread: message.threadUnread === true,
       parent: message.parent === true
     }
     var sameBlock = last && !message.system && !last.system && day === lastDay

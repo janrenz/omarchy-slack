@@ -14,6 +14,8 @@ manifest.json          schemaVersion 1. kinds, entryPoints, and the settings
                        `setting()`.
 src/slack.py           The helper. Holds the token, makes every network call,
                        prints one JSON object per invocation. Stdlib only.
+                       Caches beside the token: marks.json (channel read
+                       marks), threads.json (thread read marks, local only).
 src/emoji.py           :shortcode: -> character, for the helper's flattening.
 src/config.py          Shared paths and the token store the helper reads.
 src/Model.js           Pure JS: shaping, grouping, labels, link building. No Qt
@@ -28,6 +30,11 @@ src/SlackWindow.qml    The window. Sidebar, transcript, message box. ~2k lines.
 src/Notifier.qml       omarchy-notification-send, the prime-then-announce rule,
                        and the click that opens the conversation.
 src/PollGate.qml       Whether it is worth polling at all: idle, network, battery.
+src/handover.sh        Builds the prompt that hands a conversation to the
+                       user's coding agent and execs omarchy-agent. Runnable by
+                       hand; --print shows the prompt and launches nothing.
+skills/omarchy-slack/  What that agent is pointed at: the helper's commands, and
+                       how to hand a draft back instead of posting it.
 src/SettingsForm.qml   The settings UI shown inside the shell's settings panel.
 src/QuickSwitcher.qml  `n` / `Ctrl-k`. src/SearchPane.qml is Slack search.
 src/ImageViewer.qml    A picture from the transcript, with save-as.
@@ -82,6 +89,11 @@ python3 src/slack.py create-app --dry-run   # is the app manifest still valid?
 dev/run.sh                                  # the real window, offscreen
 dev/shot.sh /tmp/slack.png [demo-im-0]      # photograph what it is drawing
 dev/showcase.sh                             # regenerate the README images
+
+qs -p $STAGE/shell.qml ipc call dev handover      # the argv a handover would run
+qs -p $STAGE/shell.qml ipc call dev draft '{...}' # a draft coming back
+qs -p $STAGE/shell.qml ipc call dev handovers false
+qs -p $STAGE/shell.qml ipc call dev texts agent    # is that row on screen at all?
 ```
 
 A syntax check across the whole repo, which is worth having before a commit and
@@ -95,6 +107,9 @@ A bare `qmlformat` is "command not found", and inside a loop with `|| echo FAIL`
 that reads as every file being broken - which is a confusing way to learn that
 nothing is wrong. It catches what a running shell does not: a file that parses
 but is never imported by the harness.
+
+The three above are how the agent handover is exercised without an agent
+actually starting: `agentArgv()` is split out of `askAgent()` for exactly that.
 
 `dev/link.sh` assembles a Quickshell config folder in `$XDG_RUNTIME_DIR/omarchy-slack-dev`
 and symlinks the sources into it. It has to: Quickshell only imports modules
@@ -150,6 +165,18 @@ fatal QML error makes it exit instead.
   interval. The mail plugin solved the same problem by moving the data into a
   `kinds: ["service"]` singleton (`Store.qml`); this plugin has not yet. Bear it
   in mind before adding another poll.
+- **A thread's unread mark comes free with the transcript, and only for the
+  open channel.** `message_row` forwards `subscribed`, `lastRead`,
+  `latestReplyTs` and the `threadUnread` it computes from them; Slack sends
+  those on a thread parent for a thread the user follows, and sends no unread
+  *count* at all - hence `threadLabel(count, unread)` saying "new" rather than a
+  number. Extending it to sidebar marks means one `conversations.history` per
+  channel per poll, which the rate limit rules out.
+- **Reading a thread is marked locally, because Slack has no method for it.**
+  `thread-read` writes `threads.json` in the cache and `apply_thread_marks`
+  reads it back; by construction it can only clear a mark, never invent one. If
+  you add a way to see a thread, mark it read there too, or the chip will keep
+  saying "new" about something the user just read.
 - **Sending a file is three requests, and only the third shares it.**
   `files.getUploadURLExternal` reserves an id and a URL, the bytes go to that
   URL as `multipart/form-data` with one part named `file` (which is what Slack's
@@ -180,9 +207,18 @@ fatal QML error makes it exit instead.
   anything else. It has no app id of its own, so its `title` is the only handle
   a Hyprland window rule has on it.
 - **`omarchy-shell shell summon janrenz.omarchy.slack '<json>'`** delivers that
-  JSON to `SlackWindow.open(payloadJson)`, which currently ignores it. Same for
-  `omarchy-shell shell call <id> <method> <arg>`, which routes to any method on
-  the loaded window.
+  JSON to `SlackWindow.open(payloadJson)`, which hands it to `applyPayload`:
+  `conversation`/`thread`/`message` reveal a message (what a clicked
+  notification passes), `draft` puts an agent's answer in the message box
+  unsent. The shell drains its payload queue in a loop and delivers to a window
+  that is already open, so anything added there has to survive arriving twice
+  and must not throw away a draft being typed. `omarchy-shell shell call <id>
+  <method> <arg>` routes to any method on the loaded window - `agentDraft` is
+  the same draft route, and returns what it made of the payload.
+- **The coding-agent handover is one setting away from not existing.**
+  `agentHandover` gates the `a` key, the button, the help entry and the inbound
+  draft. A feature that reaches other people's messages has to be refusable, so
+  check the gate rather than assuming it.
 
 ## House style
 
