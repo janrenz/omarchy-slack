@@ -166,7 +166,25 @@ uses, is an app you install into your own workspace and a token it shows you.
 
 They are all *user* scopes, not bot scopes: this plugin reads what you can read
 and posts as you, which is the point. Nothing here lets the app act on its own,
-and there is no bot in your workspace afterwards.
+and nobody can send anything through it but you.
+
+### The name you give the app is a name other people see
+
+Slack stamps every message posted through an app with that app's identity, even
+when the token is your own user token and the message is from you. In the
+conversation the message is yours and looks it. In the sidebar's one-line
+preview of the newest message, and anywhere else Slack summarises rather than
+renders, the label is the app's name — so a channel's preview line reads
+`Omarchy Slack: see you at four` to everybody in it.
+
+There is no way to post without it. `chat.postMessage` has no parameter that
+detaches a message from the app it was sent through; `as_user: true` changes
+nothing, because for a user token it is already true. What the name *is*, on
+the other hand, is entirely yours: put your own name in `display_information`
+above, or anything else you would not mind reading in that line. It can be
+changed later — **api.slack.com/apps → your app → Basic Information → Display
+Information → App Name** — and changing only the name does not touch the
+scopes, so the token you already pasted goes on working.
 
 ### Four things on that site are called a token. Only one of them is this one
 
@@ -677,6 +695,21 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.6.1 — 2026-09-02
+
+- **Says that the app's name is public, because it is.** Slack stamps every
+  message posted through an app with that app's identity, so a channel's
+  preview line read `Omarchy Slack: …` to everybody in it while the message
+  inside the conversation was plainly yours. Nothing sent it that way by
+  mistake and no parameter turns it off — `as_user` is already true for a user
+  token — but the setup instructions handed you the name `Omarchy Slack` and
+  said nothing about where it would turn up. Now they do, along with where to
+  change it and that the token survives the change.
+- **Stops claiming your workspace gets no bot.** It gets an app identity, which
+  is what that preview line is naming. The scopes are still all user scopes and
+  still nobody can post through the app but you, which was the part worth
+  saying.
 
 ### 0.6.0 — 2026-09-02
 
