@@ -229,6 +229,68 @@ def read_capped(response, limit=MAX_RESPONSE_BYTES):
 
 
 # --------------------------------------------------------------------------
+# redirects
+#
+# Every host check in this file looks at the URL it was handed, and a redirect
+# is the one way a URL stops being the address that was checked. urllib
+# follows one by copying the request's headers onto the new request -
+# everything except Content-Length and Content-Type, so `Authorization` among
+# them - and it compares no hosts while doing it. An allowed host answering
+# `302 Location: https://evil/` would therefore hand this workspace's token to
+# whoever answers there, having passed every check above.
+#
+# So the check is made again on the way through: the token comes off as soon
+# as the host changes, a redirect off https is refused rather than downgraded,
+# and the one request that *sends* the user's file refuses redirects outright -
+# bytes that were meant for one host are not quietly posted to another.
+# --------------------------------------------------------------------------
+
+
+class GuardedRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only as far as it can be followed safely."""
+
+    def __init__(self, allowed=(), refuse=False):
+        self.allowed = tuple(allowed)
+        self.refuse = refuse
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlsplit(newurl)
+        where = target.hostname or "nowhere"
+        if self.refuse:
+            raise AccountError(
+                "redirect_refused",
+                "That request was redirected to %s, which this plugin will not follow" % where)
+
+        new = super().redirect_request(request, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        # super() may have rewritten the URL (a space becomes %20), so the
+        # decision is made about the address that will actually be fetched.
+        target = urllib.parse.urlsplit(new.full_url)
+        where = target.hostname or "nowhere"
+        if target.scheme != "https":
+            raise AccountError("bad_redirect",
+                               "Refusing to follow a redirect to %s://%s" % (target.scheme, where))
+        if self.allowed and where not in self.allowed:
+            raise AccountError("bad_redirect", "Refusing to follow a redirect to %s" % where)
+        if where != (urllib.parse.urlsplit(request.full_url).hostname or ""):
+            new.remove_header("Authorization")
+        return new
+
+
+def guarded_opener(allowed=(), refuse_redirects=False):
+    """An opener that re-checks the host every time a redirect moves it."""
+    return urllib.request.build_opener(GuardedRedirects(allowed, refuse_redirects))
+
+
+# The API talks to one host and has never had a reason to move; anything else
+# is a sign the request is not going where it was addressed. Shared between
+# threads, like the global opener `urlopen` uses: the handlers hold no
+# per-request state, and each open makes its own connection.
+API_OPENER = guarded_opener(("slack.com",))
+
+
+# --------------------------------------------------------------------------
 # the Slack Web API
 # --------------------------------------------------------------------------
 
@@ -303,7 +365,7 @@ class Slack:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with API_OPENER.open(request, timeout=timeout) as response:
                 self._remember_scopes(response)
                 payload = json.loads(read_capped(response) or b"{}")
         except urllib.error.HTTPError as error:
@@ -648,6 +710,12 @@ UPLOAD_CAP = 25 * 1024 * 1024
 IMAGE_HOSTS = ("files.slack.com", "avatars.slack-edge.com", "a.slack-edge.com",
                "secure.gravatar.com", "ca.slack-edge.com", "emoji.slack-edge.com")
 IMAGE_CAP = 12 * 1024 * 1024
+# A redirect may not leave the set of hosts the request was allowed to reach in
+# the first place, and the token comes off the moment it moves between them.
+# The upload refuses to move at all.
+IMAGE_OPENER = guarded_opener(IMAGE_HOSTS)
+CANVAS_OPENER = guarded_opener(TOKEN_HOSTS)
+UPLOAD_OPENER = guarded_opener(UPLOAD_HOSTS, refuse_redirects=True)
 MEDIA_DIR = os.path.join(CACHE_DIR, "media")
 IMAGE_TYPES = {
     "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
@@ -693,7 +761,7 @@ def fetch_media(url, token, limit=IMAGE_CAP, timeout=30):
 
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with IMAGE_OPENER.open(request, timeout=timeout) as response:
             body = response.read(limit + 1)
             if len(body) > limit:
                 raise AccountError("image_too_large",
@@ -2678,7 +2746,7 @@ def fetch_canvas(url, token, timeout=30):
         "Authorization": "Bearer " + str(token or ""),
     })
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with CANVAS_OPENER.open(request, timeout=timeout) as response:
             body = response.read(CANVAS_CAP + 1)
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
     except urllib.error.HTTPError as error:
@@ -3188,25 +3256,58 @@ def read_upload(path):
 
     A directory, a socket or a device is not a file to send even though it has
     a path, and a helpful error beats a traceback in a JSON field.
+
+    The path is resolved exactly once, at `os.open`, and every question after
+    that is asked of the descriptor rather than of the name. Asking the name
+    three times - `isfile`, then `getsize`, then `open` - is three chances for
+    it to mean a different file each time: the size that was checked is not
+    necessarily the size that is read, and a path that pointed at a holiday
+    photo when it was measured can point somewhere else by the time it is
+    opened. Nothing here needs the name after the descriptor exists, so it
+    stops being consulted. A symlink is still followed - somebody dragging a
+    link to their own file means the file - but it is followed once, and what
+    is on the other side has to be a regular file the size check then applies
+    to.
     """
     if not path:
         fail("no_file", "No file to send")
-    if not os.path.isfile(path):
+    try:
+        # O_NONBLOCK because opening is now the first thing that happens rather
+        # than the last: a FIFO with nobody writing to it, or a device waiting
+        # on a carrier, would otherwise hold the open itself and hang a helper
+        # the window is waiting on. It costs nothing on a regular file, which
+        # is the only thing that gets past the fstat below.
+        handle = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+    except IsADirectoryError:
+        fail("no_file", "%s is a folder, not a file" % path)
+    except FileNotFoundError:
         fail("no_file", "There is no file at %s" % path)
-    try:
-        size = os.path.getsize(path)
     except OSError as error:
         fail("unreadable", "Could not read %s: %s" % (path, error))
-    if size == 0:
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode):
+            fail("no_file", "%s is not a file this can send" % path)
+        if info.st_size == 0:
+            fail("empty_file", "That file is empty")
+        if info.st_size > UPLOAD_CAP:
+            fail("too_large", "That file is %.1f MB; this sends up to %d MB" % (
+                info.st_size / 1048576.0, UPLOAD_CAP // 1048576))
+        with os.fdopen(handle, "rb", closefd=False) as stream:
+            body = stream.read(UPLOAD_CAP + 1)
+    except OSError as error:
+        fail("unreadable", "Could not read %s: %s" % (path, error))
+    finally:
+        os.close(handle)
+    # The file may have grown between the fstat and the read - same descriptor,
+    # but a writer elsewhere is not waiting for us - so the cap is enforced on
+    # what was actually read and not only on what was measured.
+    if len(body) > UPLOAD_CAP:
+        fail("too_large", "That file is larger than the %d MB this sends"
+             % (UPLOAD_CAP // 1048576))
+    if not body:
         fail("empty_file", "That file is empty")
-    if size > UPLOAD_CAP:
-        fail("too_large", "That file is %.1f MB; this sends up to %d MB" % (
-            size / 1048576.0, UPLOAD_CAP // 1048576))
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(UPLOAD_CAP + 1)
-    except OSError as error:
-        fail("unreadable", "Could not read %s: %s" % (path, error))
+    return body
 
 
 def post_upload(url, filename, body, timeout=120):
@@ -3238,13 +3339,17 @@ def post_upload(url, filename, body, timeout=120):
         "Content-Type": "multipart/form-data; boundary=" + boundary,
     })
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with UPLOAD_OPENER.open(request, timeout=timeout) as response:
             # This endpoint answers in plain text ("OK - 1234"), not JSON, so
             # the status is the whole answer.
             read_capped(response)
             return 200 <= response.status < 300, ""
     except urllib.error.HTTPError as error:
         return False, "the upload was refused (HTTP %d)" % error.code
+    except AccountError as error:
+        # A refused redirect, or an answer too long to read. This function
+        # reports rather than raises, so its caller can name the file.
+        return False, error.message
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         return False, "the upload could not be sent: %s" % error
 

@@ -696,6 +696,34 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.6.2 — 2026-09-02
+
+- **A redirect can no longer walk a token off the host it was checked
+  against.** Every host check in the helper looked at the URL it was handed,
+  which is exactly the address a redirect stops being: urllib follows one by
+  copying the request's headers onto the new request, `Authorization` among
+  them, and compares no hosts on the way. `files.slack.com` answering `302
+  Location: https://evil/` would have handed over a token that can read this
+  workspace, having passed every check first. Every request now goes through an
+  opener that asks the question again — the token comes off the moment the host
+  changes, a redirect off `https` or off the allowed hosts is refused, and the
+  one request that *sends* a file follows no redirect at all, because bytes
+  addressed to one host are not posted to another because the answer said so.
+- **The file being sent is resolved once, not three times.** Reading it asked
+  the path what it was, then how big it was, then opened it — three separate
+  lookups, so the file that was measured was not necessarily the file that was
+  read, and a path that pointed at a holiday photo when it was checked could
+  point elsewhere by the time it was opened. It is opened once now and every
+  question after that is asked of the descriptor. A symlink is still followed,
+  because dragging a link to your own file means the file; it is followed once.
+  The cap is enforced on what was actually read as well as on what was
+  measured, since a file can grow while it is being sent.
+- **A folder, a pipe or a device says so instead of hanging.** Opening first
+  and asking afterwards is only safe if the open cannot block, so it is
+  non-blocking: a FIFO with nobody writing to it used to be refused by the old
+  check and would otherwise have held the helper open with the window waiting
+  on it.
+
 ### 0.6.1 — 2026-09-02
 
 - **Says that the app's name is public, because it is.** Slack stamps every

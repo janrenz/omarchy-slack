@@ -45,6 +45,22 @@ def capture(function, *args, **kwargs):
     raise AssertionError("nothing was emitted")
 
 
+class FakeOpener:
+    """Stands in for one of slack.py's guarded openers.
+
+    The helper no longer calls `urlopen` directly: every request goes through
+    an opener that re-checks the host when a redirect moves it, so a test that
+    wants a canned answer replaces the opener rather than `urlopen`, which is
+    no longer on the path.
+    """
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def open(self, request, timeout=None):
+        return self.answer(request, timeout)
+
+
 class Args:
     account = "work"
     demo = False
@@ -412,14 +428,14 @@ class Hosts(unittest.TestCase):
             self.requests.append(request)
             return Response()
 
-        self.original = slack.urllib.request.urlopen
-        slack.urllib.request.urlopen = fake_urlopen
+        self.original = slack.IMAGE_OPENER
+        slack.IMAGE_OPENER = FakeOpener(fake_urlopen)
         self.cache = tempfile.mkdtemp()
         self.original_dir = slack.MEDIA_DIR
         slack.MEDIA_DIR = self.cache
 
     def tearDown(self):
-        slack.urllib.request.urlopen = self.original
+        slack.IMAGE_OPENER = self.original
         slack.MEDIA_DIR = self.original_dir
 
     def test_an_image_from_anywhere_else_is_refused(self):
@@ -455,9 +471,173 @@ class Hosts(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-        slack.urllib.request.urlopen = lambda request, timeout=None: HtmlResponse()
+        slack.IMAGE_OPENER = FakeOpener(lambda request, timeout=None: HtmlResponse())
         with self.assertRaises(slack.AccountError):
             slack.fetch_media("https://files.slack.com/expired.png", "xoxp-secret")
+
+
+class Redirects(unittest.TestCase):
+    """The address that was checked, and the address that is actually fetched.
+
+    Every host check in slack.py looks at the URL it was handed. A redirect is
+    the one way that URL stops being the address the request ends up at, and
+    urllib follows one by copying the headers - Authorization included - onto
+    the new request without comparing hosts. These are the tests that the
+    second check exists.
+    """
+
+    def guard_of(self, opener):
+        """The GuardedRedirects in one opener. build_opener orders its own."""
+        for handler in opener.handlers:
+            if isinstance(handler, slack.GuardedRedirects):
+                return handler
+        raise AssertionError("that opener follows redirects unguarded")
+
+    def redirect(self, opener, from_url, to_url, token="xoxp-secret", method="GET"):
+        """Ask one guarded opener what it would do with this redirect."""
+        handler = self.guard_of(opener)
+        request = slack.urllib.request.Request(from_url, method=method, headers={
+            "User-Agent": slack.USER_AGENT,
+            "Authorization": "Bearer " + token,
+        })
+        return handler.redirect_request(request, None, 302, "Found", {}, to_url)
+
+    def test_a_redirect_that_stays_put_keeps_the_token(self):
+        # The ordinary case: files.slack.com moving a file to another path of
+        # its own is not somewhere new, and re-authenticating it is correct.
+        new = self.redirect(slack.IMAGE_OPENER,
+                            "https://files.slack.com/a.png",
+                            "https://files.slack.com/b.png")
+        self.assertEqual(new.get_header("Authorization"), "Bearer xoxp-secret")
+
+    def test_a_redirect_between_allowed_hosts_drops_the_token(self):
+        # Both hosts are ones this plugin will fetch from, but only one of them
+        # is a host the token belongs to. Moving between them is still moving.
+        new = self.redirect(slack.IMAGE_OPENER,
+                            "https://files.slack.com/a.png",
+                            "https://avatars.slack-edge.com/a.png")
+        self.assertIsNone(new.get_header("Authorization"))
+
+    def test_a_redirect_off_the_allowed_hosts_is_refused(self):
+        # The whole point: an allowed host answering "302 -> https://evil/"
+        # would otherwise hand over a token that can read this workspace.
+        with self.assertRaises(slack.AccountError) as caught:
+            self.redirect(slack.IMAGE_OPENER,
+                          "https://files.slack.com/a.png",
+                          "https://evil.example/a.png")
+        self.assertEqual(caught.exception.code, "bad_redirect")
+
+    def test_a_redirect_down_to_http_is_refused(self):
+        with self.assertRaises(slack.AccountError) as caught:
+            self.redirect(slack.IMAGE_OPENER,
+                          "https://files.slack.com/a.png",
+                          "http://files.slack.com/a.png")
+        self.assertEqual(caught.exception.code, "bad_redirect")
+
+    def test_the_upload_follows_no_redirect_at_all(self):
+        # This is the request that *sends* the user's file. Bytes addressed to
+        # one host are not posted to another because the answer said to.
+        with self.assertRaises(slack.AccountError) as caught:
+            self.redirect(slack.UPLOAD_OPENER,
+                          "https://files.slack.com/upload/v1/abc",
+                          "https://files.slack.com/upload/v2/abc",
+                          method="POST")
+        self.assertEqual(caught.exception.code, "redirect_refused")
+
+    def test_every_opener_in_the_file_is_a_guarded_one(self):
+        # A new opener that forgets the handler is a hole that looks like code
+        # that works, so the check is on the module rather than on a call.
+        for opener in (slack.API_OPENER, slack.IMAGE_OPENER,
+                       slack.CANVAS_OPENER, slack.UPLOAD_OPENER):
+            self.guard_of(opener)
+        self.assertEqual(self.guard_of(slack.CANVAS_OPENER).allowed, slack.TOKEN_HOSTS)
+        self.assertEqual(self.guard_of(slack.UPLOAD_OPENER).allowed, slack.UPLOAD_HOSTS)
+        self.assertTrue(self.guard_of(slack.UPLOAD_OPENER).refuse)
+
+    def test_the_helper_never_calls_urlopen_behind_the_openers_back(self):
+        # urlopen follows redirects with the default handler, which compares no
+        # hosts. One call site that slips back to it undoes all of the above.
+        source = open(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "src", "slack.py"),
+            encoding="utf-8").read()
+        self.assertNotIn("urllib.request.urlopen(", source)
+
+
+class LocalFiles(unittest.TestCase):
+    """Reading the file that is about to be sent, exactly once."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cap = slack.UPLOAD_CAP
+        slack.UPLOAD_CAP = 64
+
+    def tearDown(self):
+        slack.UPLOAD_CAP = self.cap
+
+    def write(self, name, body):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as handle:
+            handle.write(body)
+        return path
+
+    def test_an_ordinary_file_is_read(self):
+        self.assertEqual(slack.read_upload(self.write("a.txt", b"hello")), b"hello")
+
+    def test_a_symlink_to_a_real_file_is_still_followed(self):
+        # Somebody dragging a link to their own file means the file. What
+        # changed is that it is resolved once, not three times.
+        target = self.write("real.txt", b"hello")
+        link = os.path.join(self.dir, "link.txt")
+        os.symlink(target, link)
+        self.assertEqual(slack.read_upload(link), b"hello")
+
+    def test_a_folder_is_not_a_file_to_send(self):
+        payload = capture(lambda: slack.read_upload(self.dir))
+        self.assertEqual(payload["error"]["code"], "no_file")
+
+    def test_a_fifo_is_not_a_file_to_send(self):
+        # It has a path and it is not a directory, so the old isfile() check
+        # was the only thing standing between this and a read that never ends.
+        path = os.path.join(self.dir, "pipe")
+        os.mkfifo(path)
+        handle = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            payload = capture(lambda: slack.read_upload(path))
+        finally:
+            os.close(handle)
+        self.assertEqual(payload["error"]["code"], "no_file")
+
+    def test_a_missing_file_says_so(self):
+        payload = capture(lambda: slack.read_upload(os.path.join(self.dir, "nope")))
+        self.assertEqual(payload["error"]["code"], "no_file")
+
+    def test_an_empty_file_is_refused(self):
+        payload = capture(lambda: slack.read_upload(self.write("empty", b"")))
+        self.assertEqual(payload["error"]["code"], "empty_file")
+
+    def test_a_file_over_the_cap_is_refused(self):
+        payload = capture(lambda: slack.read_upload(self.write("big", b"x" * 65)))
+        self.assertEqual(payload["error"]["code"], "too_large")
+
+    def test_the_cap_is_enforced_on_what_was_read_not_on_what_was_measured(self):
+        # The file that was measured and the file that was read are the same
+        # descriptor, but a writer elsewhere is not waiting for us: something
+        # that grew past the cap between the two is still refused.
+        path = self.write("grows", b"x" * 8)
+        real_fstat = os.fstat
+
+        def small(fd):
+            info = real_fstat(fd)
+            with open(path, "ab") as handle:
+                handle.write(b"y" * 100)
+            return info
+
+        os.fstat = small
+        try:
+            payload = capture(lambda: slack.read_upload(path))
+        finally:
+            os.fstat = real_fstat
+        self.assertEqual(payload["error"]["code"], "too_large")
 
 
 class Api(unittest.TestCase):
@@ -521,14 +701,14 @@ class Api(unittest.TestCase):
                 raise Limited()
             return Fine()
 
-        original = slack.urllib.request.urlopen
-        slack.urllib.request.urlopen = urlopen
+        original = slack.API_OPENER
+        slack.API_OPENER = FakeOpener(urlopen)
         try:
             api = slack.Slack("x")
             api.MIN_INTERVAL = 0
             ok, _ = api.call("conversations.history")
         finally:
-            slack.urllib.request.urlopen = original
+            slack.API_OPENER = original
         self.assertTrue(ok)
         self.assertEqual(len(attempts), 2)
         self.assertFalse(api.rate_limited, "waited it out, so nothing to report")
@@ -547,13 +727,13 @@ class Api(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-        original = slack.urllib.request.urlopen
-        slack.urllib.request.urlopen = lambda request, timeout=None: Response()
+        original = slack.API_OPENER
+        slack.API_OPENER = FakeOpener(lambda request, timeout=None: Response())
         try:
             api = slack.Slack("xoxp-x")
             ok, _ = api.call("auth.test")
         finally:
-            slack.urllib.request.urlopen = original
+            slack.API_OPENER = original
         self.assertTrue(ok)
         self.assertEqual(api.scopes, "chat:write,users:read")
 
@@ -571,12 +751,12 @@ class Api(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-        original = slack.urllib.request.urlopen
-        slack.urllib.request.urlopen = lambda request, timeout=None: Response()
+        original = slack.API_OPENER
+        slack.API_OPENER = FakeOpener(lambda request, timeout=None: Response())
         try:
             ok, payload = slack.Slack("x").call("conversations.history")
         finally:
-            slack.urllib.request.urlopen = original
+            slack.API_OPENER = original
         self.assertFalse(ok)
         self.assertEqual(payload["error"], "channel_not_found")
 
@@ -1027,13 +1207,13 @@ class Uploads(unittest.TestCase):
             seen["body"] = request.data
             return Response()
 
-        original = slack.urllib.request.urlopen
-        slack.urllib.request.urlopen = fake_urlopen
+        original = slack.UPLOAD_OPENER
+        slack.UPLOAD_OPENER = FakeOpener(fake_urlopen)
         try:
             ok, problem = slack.post_upload(
                 "https://files.slack.com/upload/v1/abc", 'odd"name\r\n.txt', b"hello")
         finally:
-            slack.urllib.request.urlopen = original
+            slack.UPLOAD_OPENER = original
         self.assertTrue(ok, problem)
         boundary = seen["type"].split("boundary=")[1]
         self.assertIn(boundary.encode(), seen["body"])

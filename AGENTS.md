@@ -63,6 +63,23 @@ Nothing goes back the other way except a command line and a stdin payload.
    before any of the user's file leaves - an API response is a better source
    than a message, but it is still somebody else naming where our data goes, and
    no token is attached there because that URL carries its own.
+
+   **A redirect is part of that check, not an exception to it.** urllib follows
+   one by copying the request's headers onto the new request — `Authorization`
+   among them — and compares no hosts while doing it, so a host check that only
+   looks at the URL it was handed is a check a `302` walks straight through.
+   Every request goes through a `GuardedRedirects` opener that asks again: the
+   token comes off the moment the host changes, a redirect off `https` is
+   refused, a redirect off the allowed hosts is refused, and the upload follows
+   nothing at all. `urllib.request.urlopen` is not called anywhere in
+   `slack.py` — a test asserts that, because one call site slipping back to it
+   undoes the rest.
+
+   **A path is resolved once.** `read_upload` opens the file and asks the
+   descriptor everything after that; asking the name three times — `isfile`,
+   `getsize`, `open` — is three chances for it to mean a different file. The
+   open is `O_NONBLOCK` because it now happens first: a FIFO nobody is writing
+   to would otherwise hang a helper the window is waiting on.
 3. **A message never chooses its own markup.** This is about messages coming
    *in*. The one thing that goes the other way is `escape_outgoing`: a message
    being sent is escaped so a stray `<` cannot become somebody else's link, and
