@@ -168,12 +168,40 @@ fatal QML error makes it exit instead.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
-- **`Service.qml` is instantiated more than once.** `BarWidget.qml` has one and
-  `SlackWindow.qml` has another, and the bar is one surface *per monitor* — so a
-  two-monitor desktop with the window open polls the workspace three times an
-  interval. The mail plugin solved the same problem by moving the data into a
-  `kinds: ["service"]` singleton (`Store.qml`); this plugin has not yet. Bear it
-  in mind before adding another poll.
+- **`Service.qml` is instantiated more than once, and the helper is what makes
+  that safe.** `BarWidget.qml` has one and `SlackWindow.qml` has another, and
+  the bar is one surface *per monitor* — so a two-monitor desktop with the
+  window open used to poll the workspace three times an interval, in a burst,
+  which is what Slack answers with a 429 rather than averaging out. The data
+  has *not* moved into a `kinds: ["service"]` singleton the way the mail
+  plugin's did (`Store.qml`); instead `cmd_fetch` takes a `FetchSlot` — an
+  flock on `fetch.lock` in the cache — and whoever finds it taken waits and is
+  handed the snapshot the holder wrote, marked `cached`. So the count of
+  services no longer sets the count of polls, and it holds for the window and
+  for a manual refresh too, which a QML singleton would not have covered.
+  Three things follow, and each one was a bug on the way here:
+  - **The pacing in `Slack` is per instance, and every helper run is its own
+    process.** It cannot see another process's requests. Only the lock can.
+  - **Announcing may not be gated on a snapshot being freshly earned.** It was,
+    and once a service could inherit somebody else's poll that meant a message
+    announced by nobody at all. `Notifier.observe` is keyed by conversation and
+    ts and drops what it has already said, so announcing from a shared snapshot
+    is idempotent — which is what makes it safe to do unconditionally.
+  - **Only one service may announce, and `notifies` is how.** It is elected in
+    `BarWidget.qml` from `bar.moduleWidgets(moduleName)[0]`, reading
+    `bar.moduleSlots` so that it re-elects when a monitor is unplugged. Before
+    that election every copy of the widget announced: two monitors, two toasts
+    per message, each with its own replace-id so they stacked instead of
+    updating. It fails *open* — an unresolved election means "yes, speak" —
+    because the Notifier's first round through a workspace is silent anyway and
+    the lock keeps the duplicate poll off the wire.
+- **A shared snapshot must not be chased.** `Service.qml` used to answer
+  `cached: true` by immediately re-polling with `maxAge: 0`, which is how the
+  window became the third poller. Now that the helper hands back what another
+  process's poll wrote, chasing would not even terminate: every answer would
+  come back shared and ask for one more. It re-polls only when the snapshot it
+  was given is older than a whole interval, which is the bootstrap case it was
+  written for.
 - **A thread's unread mark comes free with the transcript, and only for the
   open channel.** `message_row` forwards `subscribed`, `lastRead`,
   `latestReplyTs` and the `threadUnread` it computes from them; Slack sends
@@ -200,6 +228,23 @@ fatal QML error makes it exit instead.
   apps get roughly one `conversations.history` a minute plus a burst of fifteen.
   Read the "How it knows what is new" section of the README before adding any
   per-conversation request.
+- **A transcript is kept, and `seen` is what says whether it is still good.**
+  See the "a transcript, remembered" section of `slack.py`. The trap is in
+  which two values get compared: `seen` comes from `search.messages`, which
+  returns thread replies, and `conversations.history` returns only top-level
+  messages — so a channel whose last word was a reply in a thread has a `seen`
+  permanently ahead of anything its own transcript can end on. Comparing them
+  as positions made that channel look stale on every open and the cache never
+  hit once, measured on a real workspace. What they can be trusted to agree
+  about is *change*: a transcript written while `seen` was X is current while
+  `seen` is still X. Which also fixes the guarantee in one sentence — a
+  transcript is as current as the sidebar's previews are.
+- **Anything that changes a conversation must call `drop_transcript`.** `send`,
+  `upload` and `react` do. It takes every record for the conversation, threads
+  included: a reply moves the parent's count in the channel, and a reaction is
+  given by a ts that says nothing about which of the two views it is in. The
+  reload behind those three also passes `--fresh`, because it is looking for
+  something Slack has just been told that no search has run to confirm.
 - **Lists are `Repeater`s inside `ScrollView`s**, including the transcript. Every
   row is instantiated, and every row is rebuilt whenever the array is replaced.
   That second half is measured, not assumed: a `ListView` over a plain JS array

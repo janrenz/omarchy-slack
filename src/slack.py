@@ -20,6 +20,7 @@ See README.md.
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import html as html_entities
 import json
@@ -83,10 +84,17 @@ CHANNEL_TTL = 6 * 3600
 # a fifth of every poll, for an answer that changes about weekly.
 LIST_TTL = 15 * 60
 # A finished snapshot, so a shell that has just started draws the sidebar it
-# had rather than a blank one for the length of a poll. Also what keeps the bar
-# and the window from being two pollers: whichever one is not the timekeeper
-# reads what the other just wrote.
+# had rather than a blank one for the length of a poll. Also half of what keeps
+# however many services are running from being that many pollers: a service
+# that is not the timekeeper reads what the timekeeper wrote. The other half is
+# FetchSlot, for the ones whose timers fire at the same moment.
 SNAPSHOT_MAX_AGE = 15 * 60
+# How long a poll will wait for another process's poll of the same workspace
+# before giving up and asking Slack itself. Long enough for a slow fetch to
+# finish - the whole point is to inherit its answer - and short enough that a
+# helper which has hung does not hold a bar widget's spinner all day. There is
+# a poll timer behind this either way.
+FETCH_WAIT = 25.0
 # Starring a conversation is a thing somebody does about twice a year, so
 # asking every poll would spend a request on an answer that never moves.
 STARS_TTL = 10 * 60
@@ -1717,7 +1725,12 @@ def fetch_account(alias, args):
     return result
 
 
-PRESENCE_TTL = 60
+# Presence changes on the scale of somebody walking to a meeting, and it costs
+# one request per person - twenty of them, against a bucket of fifty a minute,
+# for a dot beside a name. A minute meant asking again on nearly every poll;
+# five means the dots are a few minutes behind at worst, which is what they
+# were anyway by the time anybody looked at them.
+PRESENCE_TTL = 5 * 60
 
 
 def cmd_presence(args):
@@ -1741,9 +1754,8 @@ def cmd_presence(args):
     if not wanted:
         out({"ok": True, "presence": {}})
 
-    # Kept for a minute. Presence changes on the scale of somebody walking to
-    # a meeting, and a poll every two minutes should not be asking twenty
-    # people twice about the same minute.
+    # See PRESENCE_TTL. A poll every two minutes should not be asking twenty
+    # people over and over about a dot that has not moved.
     cached = read_json(cache_path(args.account, "presence.json"), None) or {}
     known = cached.get("presence") or {}
     now = time.time()
@@ -1772,6 +1784,128 @@ def cmd_presence(args):
     out({"ok": True, "presence": {user: known[user] for user in wanted if user in known}})
 
 
+class FetchSlot:
+    """The one poll a workspace may have in flight, held across processes.
+
+    A bar surface is built per monitor and each one has its own `Service`, so a
+    two-monitor desktop starts two identical polls on the same timer tick: two
+    searches, two conversation lists, two of everything, fired close enough
+    together to be a burst rather than a rate - which is exactly what Slack
+    answers with a 429 rather than averaging out. The pacing in `Slack` cannot
+    help, because it is per instance and these are separate processes.
+
+    So a poll takes a lock first. Whoever gets it does the work and writes the
+    snapshot; whoever waited finds that snapshot already written and hands it
+    back rather than asking Slack the same question over again. Two monitors
+    then cost what one does, and three do too.
+
+    Failing open on purpose: a lock that could not be taken at all, or one
+    whose holder never finished, leaves the poll to go ahead unlocked. A
+    duplicate request is a smaller failure than a sidebar that stops moving.
+    """
+
+    def __init__(self, alias):
+        # A name that is not a filename is a problem for `fetch_account` to
+        # report, in the words the window puts in front of the user. Here it
+        # only means there is no lock to take.
+        try:
+            self.path = cache_path(alias, "fetch.lock")
+        except AccountError:
+            self.path = ""
+        # Whether somebody else held it, which is what makes their answer worth
+        # having: a snapshot written while this process waited is by definition
+        # newer than the request this process is serving.
+        self.waited = False
+        self.since = 0.0
+        self._handle = None
+
+    def _grab(self):
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def __enter__(self):
+        self.since = time.time()
+        if not self.path:
+            return self
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._handle = open(self.path, "a+")
+        except OSError:
+            return self
+        if self._grab():
+            return self
+        self.waited = True
+        deadline = self.since + FETCH_WAIT
+        while time.time() < deadline:
+            time.sleep(0.25)
+            if self._grab():
+                return self
+        return self
+
+    def __exit__(self, *_):
+        if self._handle is None:
+            return False
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self._handle.close()
+        except OSError:
+            pass
+        return False
+
+
+def cached_snapshot(alias, max_age=0, since=0.0):
+    """The snapshot on disk, when it answers the question actually being asked.
+
+    `max_age` is what the caller said it would settle for. `since` is for a
+    caller that waited on somebody else's poll: anything written after that
+    moment is that poll's answer, and is handed over whatever `max_age` said -
+    zero means "nothing stale", not "make the request again".
+    """
+    cached = read_json(cache_path(alias, "snapshot.json"), None)
+    if not cached:
+        return None
+    at = float(cached.get("at") or 0)
+    age = max(0.0, time.time() - at)
+    if since:
+        if at < since:
+            return None
+    elif not (max_age and age < max_age):
+        return None
+    payload = cached.get("snapshot") or {}
+    if not payload:
+        return None
+    payload["cached"] = True
+    payload["age"] = int(age)
+    return payload
+
+
+def fetch_accounts(snapshot, aliases, args):
+    """Poll each workspace into `snapshot`, and keep the result if it is worth it.
+
+    Split out of `cmd_fetch` so that the two ways in - with the fetch slot held
+    and without - do not each carry their own copy of the rule about what gets
+    written to disk.
+    """
+    for alias in aliases:
+        try:
+            snapshot["accounts"].append(fetch_account(alias, args))
+        except AccountError as error:
+            snapshot["accounts"].append(
+                {"ok": False, "alias": alias,
+                 "error": {"code": error.code, "message": error.message}})
+    # Only a snapshot worth waking up to. One that says "not signed in" would
+    # otherwise be handed to the next caller as if it were news.
+    if len(aliases) == 1 and snapshot["accounts"] and snapshot["accounts"][0].get("ok"):
+        write_json(cache_path(aliases[0], "snapshot.json"),
+                   {"snapshot": snapshot, "at": time.time()})
+
+
 def cmd_fetch(args):
     aliases = args.account or []
     snapshot = {
@@ -1786,32 +1920,35 @@ def cmd_fetch(args):
     # Something already on disk, and recent enough to be worth handing over
     # rather than earning again. Three callers want this and want it
     # differently: a shell that has just started wants whatever there is so the
-    # sidebar is not blank; the second of the two services - the bar and the
-    # window each have one - wants what the first just wrote rather than asking
-    # Slack the same question twice; and the poll itself passes zero and does
-    # the work.
+    # sidebar is not blank; a service that is not the timekeeper wants what the
+    # timekeeper just wrote rather than asking Slack the same question twice;
+    # and the poll itself passes zero and does the work.
     max_age = max(0, min(int(getattr(args, "max_age", 0) or 0), SNAPSHOT_MAX_AGE))
-    if max_age and len(aliases) == 1:
-        cached = read_json(cache_path(aliases[0], "snapshot.json"), None)
-        if cached and time.time() - float(cached.get("at") or 0) < max_age:
-            payload = cached.get("snapshot") or {}
-            payload["cached"] = True
-            payload["age"] = int(time.time() - float(cached.get("at") or 0))
-            out(payload)
+    fresh = bool(getattr(args, "fresh", False))
+    # The lock, and the snapshot it writes, are per workspace - so they are
+    # only reachable when this call is about exactly one.
+    single = aliases[0] if len(aliases) == 1 else ""
 
-    for alias in aliases:
-        try:
-            snapshot["accounts"].append(fetch_account(alias, args))
-        except AccountError as error:
-            snapshot["accounts"].append(
-                {"ok": False, "alias": alias,
-                 "error": {"code": error.code, "message": error.message}})
+    if max_age and single:
+        handed = cached_snapshot(single, max_age=max_age)
+        if handed:
+            out(handed)
 
-    # Only a snapshot worth waking up to. One that says "not signed in" would
-    # otherwise be handed to the next caller as if it were news.
-    if len(aliases) == 1 and snapshot["accounts"] and snapshot["accounts"][0].get("ok"):
-        write_json(cache_path(aliases[0], "snapshot.json"),
-                   {"snapshot": snapshot, "at": time.time()})
+    if not single:
+        fetch_accounts(snapshot, aliases, args)
+        out(snapshot)
+
+    with FetchSlot(single) as slot:
+        # Somebody else was already asking, and finished while this waited.
+        # Their answer is newer than this request, so it *is* the answer - even
+        # for the poll itself, which passes zero. Not for a refresh somebody
+        # pressed: that one also means re-read the conversation list, which a
+        # poll's snapshot did not do.
+        if slot.waited and not fresh:
+            handed = cached_snapshot(single, since=slot.since)
+            if handed:
+                out(handed)
+        fetch_accounts(snapshot, aliases, args)
     out(snapshot)
 
 
@@ -2197,21 +2334,196 @@ def cmd_canvas(args):
     })
 
 
+# --------------------------------------------------------------------------
+# a transcript, remembered
+#
+# Reading a conversation is the one request Slack rations hardest:
+# `conversations.history` is capped at about one a minute for an app outside
+# its Marketplace, and this one is yours. Nothing was kept, so every *re*-read
+# spent that request again: going back to the channel just left, closing the
+# window and opening it, coming out of a thread into its channel, opening the
+# same channel after each poll. A first read still costs its request and always
+# will - what is fixed here is the other kind, which is most of them.
+#
+# So a transcript is written to disk and drawn from there, and Slack is only
+# asked when there is reason to think it has moved. What supplies that reason
+# is free: the poll already remembers the newest thing its one search saw in
+# every conversation - `marks.json`'s `seen` - so a transcript written while
+# that value was X is still current while it is still X. Nothing has been said
+# in the conversation since, in a thread or out of it, and saying so costs no
+# request at all.
+#
+# Note what is *not* compared: `seen` against the transcript's own newest
+# message. A search result includes thread replies and `conversations.history`
+# returns only top-level messages, so a channel whose last word was a reply in
+# a thread has a `seen` permanently ahead of anything its transcript can end
+# on - measured here, on a real workspace, and it never hit the cache once.
+# What the two can be trusted to agree about is change, not position.
+#
+# The guarantee this gives is therefore exactly the sidebar's own: a transcript
+# is as current as the previews are. A conversation too quiet for the search's
+# fortnight, or busy enough to fall off the end of it, has no witness at all
+# and falls back to its age.
+#
+# The canvas id rides along in the same record, which means a cache hit also
+# saves the `conversations.info` that opening a conversation used to spend
+# finding out whether it kept one.
+# --------------------------------------------------------------------------
+
+# For a conversation the poll's search remembers nothing about - quieter than
+# its fortnight, or one the sidebar has not covered yet. Long enough that going
+# back and forth between two channels is free, short enough that a channel
+# opened again after a coffee is read afresh.
+TRANSCRIPT_TTL = 90
+# A thread has a coarser witness than a channel: `seen` moving says something
+# was said in the conversation, not which thread it was said in. So a thread's
+# transcript is worth only its age, and little of it - a thread is usually
+# where the conversation is happening while somebody is looking at it.
+THREAD_TTL = 20
+
+
+def poll_seen(alias, channel):
+    """The newest thing the poll's search last saw in this conversation.
+
+    Empty when it has seen nothing - a conversation quieter than the search's
+    fortnight, or one it has not covered yet.
+    """
+    try:
+        return str((load_marks(alias)[1] or {}).get(channel) or "")
+    except AccountError:
+        return ""
+
+
+def transcript_cache_path(alias, channel, thread):
+    """Where one conversation's - or one thread's - last transcript is kept.
+
+    The name is scrubbed rather than trusted: a conversation id comes from the
+    server, and a filename built out of one must not be able to name a path of
+    its own choosing.
+    """
+    key = "%s-%s" % (channel, thread) if thread else str(channel)
+    # A separator is dropped rather than replaced, and so is a leading dot: the
+    # result is a name in this one directory and can be nothing else.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", key).lstrip(".") or "unknown"
+    return cache_path(alias, os.path.join("transcripts", safe + ".json"))
+
+
+def load_transcript(alias, channel, thread):
+    try:
+        return read_json(transcript_cache_path(alias, channel, thread), None)
+    except AccountError:
+        return None
+
+
+def save_transcript(alias, channel, thread, payload, top, avatars):
+    rows = payload.get("messages") or []
+    # Oldest first, the way a transcript reads - so the newest is the last one.
+    # Kept for reading by hand rather than for deciding anything: what decides
+    # is `seen`, and the comment above says why they are not the same thing.
+    newest = str(rows[-1].get("ts") or "") if rows else ""
+    try:
+        path = transcript_cache_path(alias, channel, thread)
+    except AccountError:
+        return
+    write_json(path, {"at": time.time(), "newest": newest,
+                      "seen": poll_seen(alias, channel),
+                      "top": int(top), "avatars": bool(avatars),
+                      "payload": payload})
+
+
+def drop_transcript(alias, channel):
+    """Forget everything cached about a conversation, because it just changed.
+
+    Sending, sending a file and reacting are each followed by a reload, and
+    that reload has to reach Slack: what is on disk is a message out of date
+    and no search has run to say so.
+
+    Every record for the conversation goes, not just the one view that was
+    changed. A thread reply moves the parent's reply count in the channel; a
+    reaction is given by a ts and nothing at this point says whether that ts is
+    in the channel or in one of its threads. There are only ever a handful of
+    records per conversation, so taking them all is cheaper than being clever
+    about which.
+    """
+    try:
+        directory = os.path.dirname(transcript_cache_path(alias, channel, ""))
+    except AccountError:
+        return
+    prefix = re.sub(r"[^A-Za-z0-9._-]", "", str(channel))
+    if not prefix:
+        return
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if name == prefix + ".json" or name.startswith(prefix + "-"):
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
+
+
+def transcript_is_current(alias, channel, thread, cached, top, avatars):
+    """Whether what is on disk can be handed over without asking Slack."""
+    if not cached or not isinstance(cached.get("payload"), dict):
+        return False
+    age = time.time() - float(cached.get("at") or 0)
+    # A clock that went backwards, which a laptop's does across a suspend.
+    if age < 0:
+        return False
+    # Asked for more than was kept, or asked for the faces when it was written
+    # without them: a different question, so not this answer.
+    if int(cached.get("top") or 0) < int(top):
+        return False
+    if bool(avatars) and not bool(cached.get("avatars")):
+        return False
+    if thread:
+        return age < THREAD_TTL
+    # Still current while the poll has learned nothing new about this
+    # conversation since it was written.
+    seen, was = poll_seen(alias, channel), str(cached.get("seen") or "")
+    if seen and was:
+        return seen == was
+    return age < TRANSCRIPT_TTL
+
+
 def cmd_messages(args):
     if args.demo:
         out(demo_messages(args.channel, args.thread))
 
     account = load_account(args.account)
+
+    channel = str(args.channel)
+    thread = str(args.thread or "")
+    top = max(1, min(args.top, MESSAGE_CAP))
+    # An anchored transcript is a jump to one message from a search result: ad
+    # hoc, keyed by nothing the next open would ask for again, and so not worth
+    # a record of its own.
+    cacheable = not args.around
+    if cacheable and not getattr(args, "fresh", False):
+        cached = load_transcript(args.account, channel, thread)
+        if transcript_is_current(args.account, channel, thread, cached, top, args.avatars):
+            payload = dict(cached["payload"])
+            # Re-applied rather than taken from the record: a thread read since
+            # this was written is read, and the chip in the channel should not
+            # go on saying "new" about it. `apply_thread_marks` only ever
+            # clears a mark, so doing it again is safe.
+            payload["messages"] = apply_thread_marks(
+                args.account, channel, list(payload.get("messages") or []))
+            payload["cached"] = True
+            payload["age"] = int(max(0.0, time.time() - float(cached.get("at") or 0)))
+            out(payload)
+
     api = Slack(account["token"])
 
     if args.thread:
         ok, payload = api.call("conversations.replies", {
-            "channel": args.channel, "ts": args.thread,
-            "limit": str(max(1, min(args.top, MESSAGE_CAP))),
+            "channel": args.channel, "ts": args.thread, "limit": str(top),
         })
         messages = payload.get("messages") or []
     else:
-        params = {"channel": args.channel, "limit": str(max(1, min(args.top, MESSAGE_CAP)))}
+        params = {"channel": args.channel, "limit": str(top)}
         if args.around:
             # Anchored at one message rather than at the end: what jumping to a
             # search result means. Everything before it, and it at the bottom.
@@ -2242,7 +2554,7 @@ def cmd_messages(args):
 
     rows = apply_thread_marks(args.account, args.channel,
                               transcript(api, args.account, account, messages, args.avatars))
-    out({
+    result = {
         "ok": True,
         "channel": args.channel,
         "thread": args.thread or "",
@@ -2256,7 +2568,12 @@ def cmd_messages(args):
         # pressed - a canvas is a document, and most of the time it is not what
         # was being opened.
         "canvasFileId": canvas_of(api, args.channel) if not args.thread else "",
-    })
+    }
+    # Kept whole, canvas id and all, so the next open of this conversation
+    # costs neither the history request nor the one that found the canvas.
+    if cacheable:
+        save_transcript(args.account, channel, thread, result, top, args.avatars)
+    out(result)
 
 
 def cmd_thread_read(args):
@@ -2309,6 +2626,9 @@ def cmd_send(args):
         if code in ("missing_scope", "not_allowed_token_type"):
             fail("permission_required", scope_error(["chat:write"]))
         fail("send_failed", friendly(code))
+    # The transcript on disk is now one message out of date, and no search has
+    # run to say so: the reload behind this has to reach Slack.
+    drop_transcript(args.account, args.channel)
     out({"ok": True, "ts": str(payload.get("ts") or "")})
 
 
@@ -2447,6 +2767,7 @@ def cmd_upload(args):
              "That file reached Slack but could not be posted: %s" % friendly(code))
 
     shared = (completed.get("files") or [{}])[0]
+    drop_transcript(args.account, args.channel)
     out({"ok": True,
          "id": file_id,
          "title": title,
@@ -2479,6 +2800,8 @@ def cmd_react(args):
         if code == "missing_scope":
             fail("permission_required", scope_error(["reactions:write"]))
         fail("react_failed", friendly(code))
+    # A chip changed, which is part of the transcript.
+    drop_transcript(args.account, args.channel)
     out({"ok": True, "name": name, "removed": bool(args.remove)})
 
 
@@ -3176,6 +3499,9 @@ def main():
     messages.add_argument("--top", type=int, default=30)
     messages.add_argument("--avatars", dest="avatars", action="store_true", default=True)
     messages.add_argument("--no-avatars", dest="avatars", action="store_false")
+    messages.add_argument("--fresh", action="store_true",
+                          help="read it from Slack rather than from the last one kept - what "
+                               "pressing r means, and what a reload after sending needs")
     messages.add_argument("--demo", action="store_true")
     messages.set_defaults(func=cmd_messages)
 

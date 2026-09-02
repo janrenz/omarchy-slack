@@ -516,6 +516,25 @@ function presenceWanted(view, limit) {
   return out
 }
 
+// The same thing, but only about the people the sidebar is actually drawing.
+//
+// `presenceWanted` walks every direct message in the snapshot, which is up to
+// thirty of them - and the sidebar folds the quiet ones away behind one row,
+// so most of those are people whose dot is not on screen to be looked at. One
+// request each, against a bucket of fifty a minute. These rows are the ones
+// `conversationRows` produced, headings and the fold row included, so the
+// conversations among them are exactly what is visible.
+function presenceWantedFromRows(rows, limit) {
+  var out = []
+  var list = rows || []
+  for (var i = 0; i < list.length && out.length < (limit || 20); i++) {
+    if (list[i].kind !== "conversation") continue
+    var who = String(list[i].userId || "")
+    if (who !== "" && out.indexOf(who) === -1) out.push(who)
+  }
+  return out
+}
+
 function searchRows(matches) {
   var list = matches || []
   var rows = []

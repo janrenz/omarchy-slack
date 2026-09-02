@@ -227,7 +227,7 @@ Column {
   Toggle {
     width: parent.width
     label: "Show who is around"
-    description: "A dot on each direct message. Needs the users:read scope, and costs one request per person in view."
+    description: "A dot on each direct message. Needs the users:read scope, and costs one request per person on screen - asked about the rows the sidebar is drawing, and kept for five minutes."
     checked: root.current("presence", true) !== false
     onClicked: root.change("presence", !(root.current("presence", true) !== false))
   }

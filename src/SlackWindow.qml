@@ -869,7 +869,7 @@ Item {
           if (text === "e" || text === "+") root.startPicking()
           else if (text === "t") root.openThreadHere()
           else if (text === "a") root.askAgent()
-          else if (text === "r") service.reloadConversation()
+          else if (text === "r") service.reloadConversation(true)
           else if (text === "c") service.toggleCanvas()
           else if (text === "u") service.unreadOnly = !service.unreadOnly
           else if (text === "m") service.markCurrentRead()
@@ -2183,7 +2183,7 @@ Item {
                     foreground: Color.foreground
                     fontFamily: Style.font.family
                     fontSize: Style.font.caption
-                    onClicked: service.reloadConversation()
+                    onClicked: service.reloadConversation(true)
                   }
 
                   // The same handover the a key does. Gone entirely when the

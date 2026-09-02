@@ -30,6 +30,30 @@ BarWidget {
     Quickshell.execDetached(["omarchy-shell", "shell", "toggle", "janrenz.omarchy.slack"])
   }
 
+  // Whether this is the copy of the widget that speaks.
+  //
+  // A bar surface is built per monitor, so this widget is live once per screen
+  // - and every one of them used to announce, which on a two-monitor desktop
+  // meant two toasts for every message, each with its own replace-id so they
+  // stacked rather than updated. The first live instance is the one that
+  // announces; the others draw the same count off the same snapshot and say
+  // nothing.
+  //
+  // `bar.moduleSlots` is read so that this re-elects: it changes when a
+  // monitor arrives or goes, and without it unplugging the elected screen
+  // would take the notifications with it.
+  //
+  // Failing open, for the moment before the slots have registered: two
+  // services that both think they speak cost nothing, because the Notifier's
+  // first round through a workspace is silent by design and the helper's own
+  // lock keeps the duplicate poll from reaching Slack.
+  readonly property bool primaryInstance: {
+    var slots = root.bar ? root.bar.moduleSlots : null
+    if (!slots || typeof root.bar.moduleWidgets !== "function") return true
+    var peers = root.bar.moduleWidgets(root.moduleName)
+    return peers.length === 0 || peers[0] === root
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -38,8 +62,9 @@ BarWidget {
     settings: root.settings
     pluginDir: root.pluginDir
     // The bar is always here and the window is not, so new messages are
-    // announced from behind the icon rather than from behind the window.
-    notifies: true
+    // announced from behind the icon rather than from behind the window - and
+    // from behind one icon rather than one per monitor. See primaryInstance.
+    notifies: root.primaryInstance
     // Faces and presence are a request each and are only ever looked at in the
     // window. The bar draws a count.
     wantsDecoration: false

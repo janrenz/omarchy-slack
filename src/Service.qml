@@ -161,7 +161,7 @@ Item {
     // Asked for by hand, so nothing cached will do: the conversation list is
     // re-read too, which is how a channel joined in Slack itself turns up here.
     refresh({ fresh: true })
-    reloadConversation()
+    reloadConversation(true)
   }
 
   Process {
@@ -186,12 +186,25 @@ Item {
       root.errorMessage = ""
       root.snapshot = parsed
       root.painted = true
-      // A snapshot handed over from disk is not news, and announcing it would
-      // announce the same messages the other service already announced.
-      if (parsed.cached !== true) root.announceNew()
+      // Announced whether this snapshot was earned here or read off disk.
+      // There is exactly one service that speaks - see `notifies`, elected in
+      // BarWidget.qml - so there is nobody to say it twice, and skipping a
+      // shared snapshot used to mean a message announced by nobody at all
+      // when the poll that found it was somebody else's. Notifier.observe is
+      // keyed by conversation and ts and drops what it has already said, so
+      // seeing the same snapshot twice is silent.
+      root.announceNew()
       root.loadPresence()
-      // Painted from the cache, so the real one is still owed.
-      if (parsed.cached === true) Qt.callLater(function() { root.refresh({ maxAge: 0 }) })
+      // Painted from a snapshot somebody else earned, and worth replacing with
+      // a poll of our own only when it is genuinely old: that is the bootstrap
+      // case, where anything on disk beats a blank sidebar for the length of a
+      // poll. A snapshot from this interval is already what a poll would have
+      // produced - chasing that one is how this service became the third
+      // poller on a two-monitor desktop, and now that the helper hands back
+      // what another process's poll wrote it would not even terminate: every
+      // answer would come back shared and ask for one more.
+      if (parsed.cached === true && Number(parsed.age || 0) > root.refreshIntervalSec)
+        Qt.callLater(function() { root.refresh({ maxAge: 0 }) })
       // A conversation open while the list refreshed is still the one being
       // read; reloading it here would scroll the transcript out from under
       // whoever is reading it.
@@ -334,7 +347,7 @@ Item {
   function loadPresence() {
     if (!wantsDecoration || !wantPresence || !view.canSeePresence) return
     if (presenceProc.running || pluginDir === "") return
-    var people = Model.presenceWanted(view, 20)
+    var people = Model.presenceWantedFromRows(conversations, 20)
     if (people.length === 0) return
     var command = ["python3", helper(), "presence", "--account", alias]
     for (var i = 0; i < people.length; i++) command = command.concat(["--user", people[i]])
@@ -375,7 +388,15 @@ Item {
   readonly property bool reading: openConversation !== null
   readonly property bool inThread: threadTs !== ""
 
-  function fetchMessages(row, thread, anchor) {
+  // `fresh` means go to Slack whatever is on disk. Opening a conversation does
+  // not: the helper keeps the last transcript it read and can tell, out of
+  // what the poll already remembers, whether it is still current - which is
+  // what makes clicking through four channels cost one request instead of one
+  // refusal each. See the "a transcript, remembered" section of slack.py.
+  // Pressing r means it, and so does the reload after sending or reacting:
+  // that one is looking for something Slack has just been told and nothing
+  // local knows yet.
+  function fetchMessages(row, thread, anchor, fresh) {
     if (!row) return
     messagesError = ""
     messagesLoading = true
@@ -384,6 +405,7 @@ Item {
                    "--channel", String(row.id), "--top", "40"]
     if (String(thread || "") !== "") command = command.concat(["--thread", String(thread)])
     if (String(anchor || "") !== "") command = command.concat(["--around", String(anchor)])
+    if (fresh === true) command.push("--fresh")
     if (!wantAvatars) command.push("--no-avatars")
     if (demo) command.push("--demo")
     messageProc.command = command
@@ -497,9 +519,9 @@ Item {
   // Re-read what is open. Deliberately not by closing and reopening it: that
   // emptied the transcript before the new rows arrived, so it flashed blank.
   // The same rows stay on screen until better ones land.
-  function reloadConversation() {
+  function reloadConversation(fresh) {
     if (!openConversation) return
-    fetchMessages(openConversation, threadTs, anchorTs)
+    fetchMessages(openConversation, threadTs, anchorTs, fresh)
   }
 
   Process {
@@ -803,7 +825,7 @@ Item {
       }
       root.uploadNotice = "Sent " + String(parsed.title || "that file")
       root.draft = ""
-      root.reloadConversation()
+      root.reloadConversation(true)
       root.refresh()
     }
   }
@@ -830,7 +852,7 @@ Item {
         return
       }
       root.draft = ""
-      root.reloadConversation()
+      root.reloadConversation(true)
       root.refresh()
     }
   }
@@ -891,7 +913,7 @@ Item {
       root.reactError = ""
       // Re-read rather than guess at the new count: somebody else may have
       // reacted in the meantime, and the transcript should show what is there.
-      root.reloadConversation()
+      root.reloadConversation(true)
     }
   }
 

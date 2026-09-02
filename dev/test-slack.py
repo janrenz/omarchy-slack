@@ -13,6 +13,7 @@ classes of bug that are invisible until they matter.
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -1091,7 +1092,7 @@ class Caches(unittest.TestCase):
         self.assertNotIn("cached", payload)
         self.assertTrue(asked, "it went and asked")
 
-    def test_presence_is_kept_for_a_minute_and_then_asked_again(self):
+    def test_presence_is_kept_and_not_asked_again_on_the_next_poll(self):
         asked = []
 
         class Counting(slack.Slack):
@@ -1111,8 +1112,304 @@ class Caches(unittest.TestCase):
         self.assertEqual(first["presence"]["U1"]["state"], "active")
         self.assertEqual(second["presence"]["U2"]["state"], "active")
         # Two people, asked about once between them: the repeat in the list is
-        # not a second request, and neither is the second call a minute later.
+        # not a second request, and neither is the poll that follows. Presence
+        # is kept for PRESENCE_TTL, which is several polls' worth - it is one
+        # request per person and it moves on the scale of somebody walking to
+        # a meeting.
         self.assertEqual(sorted(asked), ["U1", "U2"])
+        self.assertGreaterEqual(slack.PRESENCE_TTL, 120)
+
+    def test_a_poll_that_waited_on_another_one_takes_its_answer(self):
+        """The two-monitor case: one bar polls, the other inherits.
+
+        `cached_snapshot` is what decides it. `since` is the moment this poll
+        began waiting, and anything written after that is the other poll's
+        answer - handed over whatever max_age said, because a poll passes zero
+        and zero means "nothing stale", not "ask again regardless".
+        """
+        began = time.time()
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"snapshot": {"ok": True, "accounts": [{"alias": "work"}]},
+                          "at": began + 1})
+        handed = slack.cached_snapshot("work", max_age=0, since=began)
+        self.assertTrue(handed["cached"])
+        self.assertEqual(handed["accounts"][0]["alias"], "work")
+
+    def test_a_snapshot_from_before_the_wait_is_not_that_answer(self):
+        began = time.time()
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"snapshot": {"ok": True, "accounts": []}, "at": began - 30})
+        self.assertIsNone(slack.cached_snapshot("work", max_age=0, since=began))
+
+    def test_a_poll_waits_for_a_poll_another_process_is_already_running(self):
+        """The lock itself, which only means anything between processes.
+
+        flock is owned by the process, so a second FetchSlot in this one would
+        be handed the lock it already holds. The holder therefore has to be a
+        real other process.
+        """
+        path = slack.cache_path("work", "fetch.lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl,sys,time\n"
+             "h=open(sys.argv[1],'a+')\n"
+             "fcntl.flock(h, fcntl.LOCK_EX)\n"
+             "sys.stdout.write('held\\n'); sys.stdout.flush()\n"
+             "time.sleep(1.0)\n", path],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            with slack.FetchSlot("work") as slot:
+                self.assertTrue(slot.waited, "it noticed somebody else was mid-poll")
+        finally:
+            holder.wait(timeout=5)
+
+    def test_a_free_slot_is_taken_at_once(self):
+        with slack.FetchSlot("work") as slot:
+            self.assertFalse(slot.waited)
+
+
+class Transcripts(unittest.TestCase):
+    """The one request Slack rations hardest, and how often it is spent.
+
+    `conversations.history` is capped at about one a minute for an app outside
+    Slack's Marketplace, so reading four channels in a row used to be one
+    transcript and three refusals. What is kept on disk, and what makes it
+    safe to believe, is the subject here.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original_state, self.original_cache = slack.STATE_DIR, slack.CACHE_DIR
+        slack.STATE_DIR = self.dir
+        slack.CACHE_DIR = os.path.join(self.dir, "cache")
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1",
+            "scopes": ",".join(slack.WANTED_SCOPES)}, private=True)
+        self.asked = []
+
+    def tearDown(self):
+        slack.STATE_DIR, slack.CACHE_DIR = self.original_state, self.original_cache
+
+    def _args(self, **overrides):
+        args = Args()
+        args.account, args.demo = "work", False
+        args.channel, args.thread, args.around = "C1", "", ""
+        args.top, args.avatars, args.fresh = 40, False, False
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def _run(self, args, history=None):
+        """cmd_messages with the network answering to order."""
+        asked = self.asked
+        answers = {
+            "conversations.history": (True, {"messages": history if history is not None
+                                             else [{"type": "message", "user": "U2",
+                                                    "ts": "100.0", "text": "hello"}]}),
+            "conversations.replies": (True, {"messages": [
+                {"type": "message", "user": "U2", "ts": "100.0", "text": "in a thread"}]}),
+            # What canvas_of asks, which rides along with opening a
+            # conversation and is therefore kept or saved with it.
+            "conversations.info": (True, {"channel": {"id": "C1"}}),
+        }
+
+        class Scripted(slack.Slack):
+            def call(self, method, params=None, timeout=20, retries=1):
+                asked.append(method)
+                return answers.get(method, (True, {}))
+
+        original = slack.Slack
+        slack.Slack = Scripted
+        try:
+            return capture(slack.cmd_messages, args)
+        finally:
+            slack.Slack = original
+
+    def _seen(self, ts):
+        """What the poll's one search remembers about this conversation."""
+        slack.save_marks("work", {}, {"C1": ts})
+
+    def test_the_second_open_of_a_conversation_costs_nothing(self):
+        first = self._run(self._args())
+        self.assertEqual(first["messages"][0]["text"], "hello")
+        self.assertIn("conversations.history", self.asked)
+        spent = len(self.asked)
+
+        second = self._run(self._args())
+        self.assertTrue(second["cached"])
+        self.assertEqual(second["messages"][0]["text"], "hello")
+        self.assertEqual(len(self.asked), spent, "nothing was asked the second time")
+
+    def test_a_kept_transcript_carries_the_canvas_id_so_that_is_not_asked_twice(self):
+        self._run(self._args())
+        self.asked = []
+        again = self._run(self._args())
+        self.assertTrue(again["cached"])
+        self.assertNotIn("conversations.info", self.asked,
+                         "the canvas id came back with the transcript")
+
+    def test_a_conversation_the_poll_has_learned_nothing_new_about_is_believed(self):
+        self._seen("100.0")
+        self._run(self._args())
+        self.asked = []
+        payload = self._run(self._args())
+        self.assertTrue(payload["cached"])
+        self.assertEqual(self.asked, [])
+
+    def test_a_conversation_the_poll_has_since_seen_something_in_is_read_again(self):
+        self._seen("100.0")
+        self._run(self._args())
+        self._seen("200.0")
+        self.asked = []
+        payload = self._run(self._args())
+        self.assertNotIn("cached", payload)
+        self.assertIn("conversations.history", self.asked)
+
+    def test_a_reply_in_a_thread_does_not_make_a_channel_look_stale_for_ever(self):
+        """The bug this criterion replaced, and why it is not a ts comparison.
+
+        `seen` comes from a search, which returns thread replies;
+        `conversations.history` returns only top-level messages. So a channel
+        whose last word was a reply in a thread has a `seen` permanently ahead
+        of anything its own transcript can end on. Comparing the two made that
+        channel look stale on every single open - measured on a real workspace,
+        where it never hit the cache once.
+        """
+        # The search saw a thread reply, later than any message in the channel.
+        self._seen("150.0")
+        first = self._run(self._args())
+        self.assertEqual(first["messages"][-1]["ts"], "100.0", "history stops earlier")
+        self.asked = []
+        payload = self._run(self._args())
+        self.assertTrue(payload["cached"], "the poll has learned nothing since")
+
+    def test_asking_for_it_fresh_ignores_what_is_on_disk(self):
+        self._seen("100.0")
+        self._run(self._args())
+        self.asked = []
+        payload = self._run(self._args(fresh=True))
+        self.assertNotIn("cached", payload)
+        self.assertIn("conversations.history", self.asked)
+
+    def test_asking_for_more_than_was_kept_is_a_different_question(self):
+        self._seen("100.0")
+        self._run(self._args(top=40))
+        self.asked = []
+        payload = self._run(self._args(top=60))
+        self.assertNotIn("cached", payload)
+
+    def test_asking_for_the_faces_when_it_was_kept_without_them_is_too(self):
+        self._seen("100.0")
+        self._run(self._args(avatars=False))
+        self.asked = []
+        payload = self._run(self._args(avatars=True))
+        self.assertNotIn("cached", payload)
+
+    def test_a_jump_to_a_search_result_is_not_kept(self):
+        self._run(self._args(around="100.0"))
+        self.assertFalse(os.path.exists(slack.transcript_cache_path("work", "C1", "")))
+
+    def test_a_thread_is_kept_under_its_own_name(self):
+        self._run(self._args(thread="90.0"))
+        self.assertTrue(os.path.exists(slack.transcript_cache_path("work", "C1", "90.0")))
+        # And the channel's own transcript is a different record, not this one.
+        self.assertFalse(os.path.exists(slack.transcript_cache_path("work", "C1", "")))
+        self.asked = []
+        payload = self._run(self._args(thread="90.0"))
+        self.assertTrue(payload["cached"])
+        self.assertEqual(self.asked, [])
+
+    def test_a_conversation_with_no_witness_at_all_is_worth_only_its_age(self):
+        """Quieter than the search's fortnight, or not covered by it yet."""
+        self._run(self._args())
+        record = slack.read_json(slack.transcript_cache_path("work", "C1", ""))
+        self.assertEqual(record["seen"], "", "nothing remembered when it was written")
+        self.asked = []
+        self.assertTrue(self._run(self._args())["cached"], "its age is still good")
+
+        path = slack.transcript_cache_path("work", "C1", "")
+        record["at"] = time.time() - (slack.TRANSCRIPT_TTL + 5)
+        slack.write_json(path, record)
+        self.assertNotIn("cached", self._run(self._args()))
+
+    def test_a_thread_is_worth_only_its_age_since_seen_does_not_say_which_one(self):
+        self._run(self._args(thread="90.0"))
+        path = slack.transcript_cache_path("work", "C1", "90.0")
+        record = slack.read_json(path)
+        record["at"] = time.time() - (slack.THREAD_TTL + 5)
+        slack.write_json(path, record)
+        # Even with the poll having learned nothing new about the conversation:
+        # `seen` moving says something was said, not which thread said it.
+        self._seen("100.0")
+        self.asked = []
+        payload = self._run(self._args(thread="90.0"))
+        self.assertNotIn("cached", payload)
+        self.assertIn("conversations.replies", self.asked)
+
+    def test_a_thread_read_here_stops_the_chip_saying_new_even_from_disk(self):
+        """A cached transcript is not a cached set of thread marks.
+
+        Reading a thread is remembered locally, because Slack has no method for
+        it - so the marks are applied again on the way out of the cache, or the
+        channel would go on saying "new" about a thread that was just read.
+        """
+        self._run(self._args(), history=[
+            {"type": "message", "user": "U2", "ts": "100.0", "text": "parent",
+             "thread_ts": "100.0", "reply_count": 2, "subscribed": True,
+             "last_read": "100.0", "latest_reply": "150.0"}])
+        record = slack.read_json(slack.transcript_cache_path("work", "C1", ""))
+        self.assertTrue(record["payload"]["messages"][0]["threadUnread"],
+                        "unread when it was written")
+
+        slack.save_thread_marks("work", {"C1:100.0": "150.0"})
+        payload = self._run(self._args())
+        self.assertTrue(payload["cached"])
+        self.assertFalse(payload["messages"][0]["threadUnread"])
+
+    def test_sending_forgets_the_transcript_so_the_reload_reaches_slack(self):
+        self._seen("100.0")
+        self._run(self._args())
+        self.assertTrue(os.path.exists(slack.transcript_cache_path("work", "C1", "")))
+
+        args = Args()
+        args.account, args.demo = "work", False
+        args.channel, args.thread, args.broadcast = "C1", "", False
+        args.text, args.stdin = "hi", False
+
+        class Posting(slack.Slack):
+            def call(self, method, params=None, timeout=20, retries=1):
+                return True, {"ok": True, "ts": "300.0"}
+
+        original = slack.Slack
+        slack.Slack = Posting
+        try:
+            capture(slack.cmd_send, args)
+        finally:
+            slack.Slack = original
+
+        self.assertFalse(os.path.exists(slack.transcript_cache_path("work", "C1", "")))
+        self.asked = []
+        payload = self._run(self._args())
+        self.assertNotIn("cached", payload)
+
+    def test_a_reply_forgets_the_thread_and_the_channel_it_is_in(self):
+        """Both, because a reply moves the parent's count in the channel too."""
+        self._run(self._args())
+        self._run(self._args(thread="90.0"))
+        slack.drop_transcript("work", "C1")
+        self.assertFalse(os.path.exists(slack.transcript_cache_path("work", "C1", "")))
+        self.assertFalse(os.path.exists(slack.transcript_cache_path("work", "C1", "90.0")))
+
+    def test_a_conversation_id_cannot_name_a_path_of_its_own(self):
+        """A conversation id comes from the server; a filename built out of one
+        must land in this directory and nowhere else."""
+        home = os.path.join(slack.CACHE_DIR, "work", "transcripts")
+        for hostile in ("../../etc/passwd", "/etc/passwd", "..", ".", "C1/../../x"):
+            path = slack.transcript_cache_path("work", hostile, "")
+            self.assertEqual(os.path.dirname(os.path.realpath(path)),
+                             os.path.realpath(home), hostile)
 
 
 class Demo(unittest.TestCase):

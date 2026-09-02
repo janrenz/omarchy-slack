@@ -19,7 +19,8 @@ const Model = new Function(
     "; return { accountView, conversationRows, conversationRow, selectableRows, groupMessages, " +
     "whenLabel, dayLabel, subtitleFor, oneLine, plainText, parseJson, linkify, hasLink, " +
     "escapeHtml, usableSpans, safeHref, densityScale, densityNames, sortNames, reactionIsMine, " +
-    "presenceColor, presenceLabel, presenceWanted, switcherRows, searchRows, fileLabel, " +
+    "presenceColor, presenceLabel, presenceWanted, presenceWantedFromRows, " +
+    "switcherRows, searchRows, fileLabel, " +
     "threadLabel, coverageLabel }"
 )()
 
@@ -278,6 +279,24 @@ test("only the people the sidebar draws are asked about", () => {
   eq(Model.presenceWanted(many, 20), ["U1", "U2"])
   eq(Model.presenceWanted(many, 1), ["U1"])
   eq(Model.presenceWanted(null, 20), [])
+})
+
+test("and only the ones the fold left on screen", () => {
+  // presenceWanted walks the snapshot, which carries up to thirty direct
+  // messages; the sidebar folds the quiet ones away behind one row. Asking
+  // about somebody whose dot is not drawn is a request spent on nothing.
+  const rows = folding([dm({ withUserId: "U1" }),
+                        quietDm("D8", "Yuki Tanaka"),
+                        quietDm("D9", "Ana Beltrán")])
+  eq(Model.presenceWantedFromRows(rows, 20), ["U1"])
+  // Unfolded, they are on screen and worth a dot each.
+  const open = folding([dm({ withUserId: "U1" }),
+                        dm({ id: "D8", title: "Yuki Tanaka", withUserId: "U8",
+                             when: "", ts: "", lastText: "" })], { showAllDms: true })
+  eq(Model.presenceWantedFromRows(open, 20), ["U1", "U8"])
+  // Headings and the fold row are rows too, and nobody is behind them.
+  eq(Model.presenceWantedFromRows([{ kind: "heading" }, { kind: "more" }], 20), [])
+  eq(Model.presenceWantedFromRows(null, 20), [])
 })
 
 // ---------------------------------------------------------------- switcher

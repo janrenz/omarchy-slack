@@ -439,25 +439,55 @@ So a poll is:
    That endpoint is not restricted; measured at ten calls a second without a
    refusal.
 
-Three more things are not asked again once they have been answered:
+Four more things are not asked again once they have been answered:
 
 - **the conversation list**, for fifteen minutes — which channels you are in
   changes about weekly, and joining one from here refreshes it on the spot;
-- **who is around**, for a minute, and never on the critical path: presence is
-  one request per person, so it is a command of its own that the window calls
-  once the sidebar is already on screen;
+- **who is around**, for five minutes, and never on the critical path: presence
+  is one request per person, so it is a command of its own that the window
+  calls once the sidebar is already on screen, and only about the people the
+  sidebar is actually drawing — the quiet direct messages fold away behind one
+  row, and a dot nobody can see is a request spent on nothing;
+- **the conversation you last read**, which is the one that matters most,
+  because it is the one request Slack rations. See below;
 - **the finished snapshot**, so a shell that has just started draws the sidebar
-  it had rather than a blank one, and so the two services — one behind the bar
-  icon, one behind the window — are not two pollers. The one that raises
-  notifications does the work; the other reads what it wrote, so an open window
-  costs no requests at all.
+  it had rather than a blank one, and so that however many services are
+  running — one behind the window and one behind the bar *on each monitor* —
+  they are not that many pollers. A poll takes a lock first: whoever gets it
+  does the work, and whoever finds it taken waits and is handed the answer that
+  poll wrote. Two monitors cost what one does, and three do too.
 
 A full poll of a workspace with 42 channels and 403 direct messages takes about
 three and a half seconds and never touches the limit; the sidebar itself is on
-screen in about a fifth of a second, from the last snapshot. `conversations.history` is spent on
-exactly one thing: the conversation you open. A few in a row is fine; opening
-fifteen in a minute is not, and the window says so in those words rather than
-showing an empty transcript.
+screen in about a fifth of a second, from the last snapshot.
+
+`conversations.history` is spent on exactly one thing: a conversation you open
+that has changed since you last read it. **The transcript you last read is kept
+on disk**, and whether it is still current is answerable for free — the poll
+already remembers the newest thing its search saw in every conversation, so a
+transcript written while that was unchanged is a transcript nothing has
+happened after.
+
+Be clear about which half of the problem that solves. Reading a conversation
+for the first time still costs a request, and four channels you have never
+opened, opened inside a minute, still run into the limit. What goes away is
+every *re*-read: going back to the one you just left, closing the window and
+opening it again, coming out of a thread into its channel, opening the same
+channel after each poll. That is most of what browsing Slack actually is — and
+those reads now cost nothing and appear the instant you open them rather than
+after a round trip. The canvas id travels in the same record, so a cached open
+does not spend the `conversations.info` that used to go looking for one either.
+
+Pressing `r` means it: that goes to Slack whatever is on disk, and so does the
+re-read after you send, upload or react, which is looking for something Slack
+has just been told and nothing here knows yet. A few in a row is fine; doing it
+fifteen times in a minute is not, and the window says so in those words rather
+than showing an empty transcript.
+
+What the cache guarantees is exactly what the sidebar guarantees: a transcript
+is as current as the previews are. A conversation too quiet for the search's
+fortnight has no witness either way, and falls back to being re-read after a
+minute and a half.
 
 Two consequences worth knowing:
 
@@ -567,6 +597,44 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.4.0 — 2026-09-02
+
+- **The conversation you just read is not read again.** Slack rations
+  `conversations.history` to about one request a minute for an app outside its
+  Marketplace, and this plugin kept nothing: clicking through four channels was
+  one transcript and three refusals, and going back to the channel you had just
+  left spent the request all over again. Transcripts are now kept on disk and
+  drawn from there, and whether one is still current costs nothing to work out —
+  the poll already remembers the newest thing its search saw in every
+  conversation, so a transcript written while that was unchanged is one nothing
+  has happened after. Reading a conversation for the first time still costs its
+  request — what goes away is every re-read: going back to the one you just
+  left, closing the window and opening it again, coming out of a thread into
+  its channel, opening the same channel after each poll. Those now cost nothing
+  and appear the instant you open them rather than after a round trip. The
+  channel's canvas id rides along in the same record, so a cached open no
+  longer spends the `conversations.info` that went looking for one either. `r`,
+  and the re-read after sending or reacting, still go to Slack.
+- **A second monitor no longer doubles what is asked of Slack.** A bar surface
+  is built per monitor and each one had its own poll loop, so a two-monitor
+  desktop with the window open polled the workspace three times an interval —
+  three searches, three conversation lists, fired close enough together to be a
+  burst, which is what Slack answers with a refusal rather than averaging out.
+  A poll now takes a lock first: whoever gets it does the work, and whoever
+  finds it taken waits and is handed the answer that poll wrote. Two monitors
+  cost what one does.
+- **And no longer doubles the notifications.** Every copy of the bar widget
+  announced, so a two-monitor desktop got two toasts for every message, each
+  stacking beside the other rather than replacing it. One copy speaks now, and
+  it re-elects when a monitor arrives or is unplugged.
+- **Presence is asked for less, and about fewer people.** It is one request per
+  person, it was kept for only a minute — so nearly every poll asked again —
+  and it asked about every direct message in the snapshot, including the quiet
+  ones the sidebar folds away behind a single row. It is now kept for five
+  minutes and asked only about the people actually on screen. Presence moves on
+  the scale of somebody walking to a meeting; twenty requests a poll for a dot
+  beside a name was the wrong trade.
 
 ### 0.3.0 — 2026-09-02
 
