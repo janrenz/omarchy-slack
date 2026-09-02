@@ -668,6 +668,78 @@ class Conversations(unittest.TestCase):
         self.assertEqual((feed, stamps), ({}, {}))
         self.assertEqual(problem, "missing_scope")
 
+    # ---- how deep the feed pages, which is the poll's whole cost ----------
+    #
+    # `search.messages` is Tier 2 - twenty a minute - and it is the one request
+    # every poll spends whether or not anybody is at the machine. Three pages
+    # per poll was three of that budget for two pages of answer the plugin
+    # already had on disk.
+
+    @staticmethod
+    def _pages(count=3):
+        """A search deep enough to page, one hundred messages to a page.
+
+        Newest first, one second apart, so page 1 is the newest hundred and
+        page 3 the oldest - which is the order the stopping rule reads.
+        """
+        def answer(params):
+            page = int((params or {}).get("page") or 1)
+            first = 100_000 - (page - 1) * 100
+            return True, {"messages": {
+                "matches": [{"channel": {"id": "C%d" % (n % 7)},
+                             "ts": "%d.0" % (first - n)} for n in range(100)],
+                "paging": {"pages": count}}}
+        return {"search.messages": answer}
+
+    def test_the_feed_pages_all_the_way_down_when_nothing_is_recorded_yet(self):
+        """The first poll of a workspace: there is no gap to bridge, only
+        coverage to build, and the deeper pages are where it comes from."""
+        api = FakeApi(self._pages())
+        slack.activity_feed(api, covered="")
+        self.assertEqual(len(api.calls), 3)
+
+    def test_the_feed_stops_at_the_page_that_reaches_the_last_poll(self):
+        """The steady state, and the ordinary case: one page.
+
+        Page 1 here reaches back to 99_901, and the last poll had already
+        recorded a message at 99_950 - so page 1 spans the whole gap between
+        the two polls, and pages 2 and 3 would re-read what `previews.json`
+        already holds.
+        """
+        api = FakeApi(self._pages())
+        feed, stamps, problem = slack.activity_feed(api, covered="99950.0")
+        self.assertEqual(len(api.calls), 1)
+        self.assertEqual(problem, "")
+        self.assertTrue(feed, "and it still answered")
+
+    def test_the_feed_keeps_paging_while_it_has_not_bridged_the_gap(self):
+        """A laptop back from a day asleep: more than a page has arrived.
+
+        The last poll's newest is below page 1 and below page 2, so stopping at
+        either would leave a conversation whose only recent message is in the
+        gap with no preview and no unread mark.
+        """
+        api = FakeApi(self._pages())
+        slack.activity_feed(api, covered="99750.0")
+        self.assertEqual(len(api.calls), 3)
+
+    def test_the_cap_still_holds_however_far_behind_it_is(self):
+        """FEED_PAGES is the deepest this looks, and that has not changed: a
+        workspace that has said more than three pages' worth keeps whatever
+        previews it had for the rest."""
+        api = FakeApi(self._pages(count=40))
+        slack.activity_feed(api, covered="1.0")
+        self.assertEqual(len(api.calls), slack.FEED_PAGES)
+
+    def test_the_high_water_mark_is_the_newest_thing_anywhere(self):
+        # Compared as numbers, not as text: "999999999.1" sorts above
+        # "1712345900.1" alphabetically and is eleven years older.
+        self.assertEqual(slack.high_water(
+            {"C1": "1712345600.1", "C2": "1712345900.1", "D1": "999999999.1"}),
+            "1712345900.1")
+        self.assertEqual(slack.high_water({}), "")
+        self.assertEqual(slack.high_water(None), "")
+
 
 class Sending(unittest.TestCase):
     """Writes, which are the ones that must refuse rather than half-work."""

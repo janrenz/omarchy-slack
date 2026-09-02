@@ -1344,11 +1344,26 @@ def channel_names(alias, rows):
 # --------------------------------------------------------------------------
 
 FEED_DAYS = 14
+# A page is a hundred messages, newest first, and three of them is the deepest
+# this will ever look. It rarely looks that deep: see `covered` below - in the
+# ordinary case, two minutes after the last poll, one page reaches further back
+# than the gap it has to bridge and the other two would be re-reading an answer
+# this plugin already has. `search.messages` is Tier 2, twenty a minute, and it
+# is the request every poll spends whether anybody is at the machine or not.
 FEED_PAGES = 3
 FEED_COUNT = 100
 
 
-def activity_feed(api, days=FEED_DAYS, pages=FEED_PAGES):
+def high_water(seen):
+    """The newest message the last poll recorded anywhere in the workspace."""
+    high = ""
+    for ts in (seen or {}).values():
+        if newer(ts, high):
+            high = str(ts)
+    return high
+
+
+def activity_feed(api, days=FEED_DAYS, pages=FEED_PAGES, covered=""):
     """The newest message in every conversation that has had one lately.
 
     ({channel id: newest match}, {channel id: [every ts seen]}, problem).
@@ -1362,6 +1377,18 @@ def activity_feed(api, days=FEED_DAYS, pages=FEED_PAGES):
     Search is date granular, so this asks for a fortnight and keeps the newest
     match per conversation; anything quieter than that keeps whatever preview
     was remembered from an earlier poll.
+
+    `covered` is the newest message the previous poll recorded anywhere - see
+    `high_water`. Paging stops as soon as a page has reached back past it,
+    because at that point every message that has arrived since the last poll is
+    already in hand, and everything older is an answer that poll already gave:
+    a message does not change after it is sent, and the preview it produced is
+    on disk in `previews.json`. So the extra pages are spent only when they buy
+    something - the first poll of a workspace, which has nothing recorded, and
+    a poll that finds more than a page of messages waiting, which is a laptop
+    coming back from a day asleep. In the steady state one page does it.
+
+    Passing nothing means paging the old way, all the way down.
     """
     since = (datetime.now(timezone.utc).date() - timedelta(days=max(1, days))).isoformat()
     feed = {}
@@ -1378,18 +1405,28 @@ def activity_feed(api, days=FEED_DAYS, pages=FEED_PAGES):
             break
         messages = payload.get("messages") or {}
         matches = messages.get("matches") or []
+        # How far back this page reached. Asked for newest first, so it is the
+        # last one - but taken as the minimum rather than trusting the order,
+        # since the whole stopping rule hangs on it.
+        oldest = ""
         for match in matches:
             channel = match.get("channel") or {}
             channel_id = str(channel.get("id") or "")
             ts = str(match.get("ts") or "")
             if not channel_id or not ts:
                 continue
+            if not oldest or newer(oldest, ts):
+                oldest = ts
             stamps.setdefault(channel_id, []).append(ts)
             if channel_id in feed and not newer(ts, feed[channel_id].get("ts")):
                 continue
             feed[channel_id] = match
         paging = messages.get("paging") or {}
         if not matches or page >= int(paging.get("pages") or 1):
+            break
+        # Reached past everything the last poll had recorded: from here down
+        # this is an answer already given.
+        if covered and oldest and not newer(oldest, covered):
             break
     return feed, stamps, problem
 
@@ -1528,7 +1565,7 @@ def fetch_account(alias, args):
     # ---- what has happened, in one request -------------------------------
     feed, stamps, feed_problem = ({}, {}, "not_asked")
     if granted(account, "search"):
-        feed, stamps, feed_problem = activity_feed(api)
+        feed, stamps, feed_problem = activity_feed(api, covered=high_water(seen))
     if feed_problem == "missing_scope" or feed_problem == "not_asked":
         warnings.append({"scope": "search", "message":
                          "Without search:read this cannot see what has been said since it last "

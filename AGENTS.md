@@ -228,6 +228,17 @@ fatal QML error makes it exit instead.
   apps get roughly one `conversations.history` a minute plus a burst of fifteen.
   Read the "How it knows what is new" section of the README before adding any
   per-conversation request.
+- **One search, and it means one.** `activity_feed` has three pages available
+  and stops at the first that reaches back past `high_water(seen)` — the newest
+  message the previous poll recorded anywhere. Everything older than that is an
+  answer already given: a message does not change after it is sent and the
+  preview it produced is in `previews.json`. Measured: three searches became
+  one on a real workspace, and every one of the twelve conversations the deeper
+  pages turned up already had a preview on disk that was no older than what
+  those pages knew. Do not "simplify" this back to a fixed page count — and do
+  not raise `FEED_PAGES` in the hope of better coverage either, because the
+  first poll of a workspace still walks all of them and that is where coverage
+  comes from.
 - **A transcript is kept, and `seen` is what says whether it is still good.**
   See the "a transcript, remembered" section of `slack.py`. The trap is in
   which two values get compared: `seen` comes from `search.messages`, which

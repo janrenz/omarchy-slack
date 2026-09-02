@@ -432,8 +432,14 @@ budget.
 So a poll is:
 
 1. two requests listing your channels and your direct messages, by name;
-2. one search — three at most — for everything said in the last fortnight,
-   which is where every preview and every "this is new" comes from;
+2. one search for everything said in the last fortnight, which is where every
+   preview and every "this is new" comes from. Three pages of it are available
+   and are almost never spent: paging stops as soon as a page has reached back
+   past the newest message the last poll recorded, because from there down the
+   answer is one this plugin already has on disk. The deeper pages go out on
+   the first poll of a workspace, which has nothing recorded yet, and when more
+   than a hundred messages have arrived since the last one — a laptop back from
+   a day asleep;
 3. `conversations.info` for the conversations whose newest message is newer
    than the read mark already held, which says how much of it you have read.
    That endpoint is not restricted; measured at ten calls a second without a
@@ -597,6 +603,20 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.4.1 — 2026-09-02
+
+- **The poll spends one search instead of three.** `search.messages` is the one
+  request every poll makes whether or not anybody is at the machine, and it
+  always walked three pages down. It no longer does: paging stops as soon as a
+  page has reached back past the newest message the previous poll recorded,
+  because from that point down it is an answer already given — a message does
+  not change after it is sent, and the preview it produced is on disk. Measured
+  on a real workspace of 42 channels and 403 direct messages: three searches
+  became one, and every conversation the two deeper pages turned up already had
+  a preview on disk that was no older than what those pages knew. The deeper
+  pages still go out where they buy something — the first poll of a workspace,
+  which has nothing recorded, and a poll that finds more than a page waiting.
 
 ### 0.4.0 — 2026-09-02
 
