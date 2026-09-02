@@ -39,6 +39,9 @@ skills/omarchy-slack/  What that agent is pointed at: the helper's commands, and
                        how to hand a draft back instead of posting it.
 src/SettingsForm.qml   The settings UI shown inside the shell's settings panel.
 src/QuickSwitcher.qml  `n` / `Ctrl-k`. src/SearchPane.qml is Slack search.
+                       The `directory` command it runs is also what the message
+                       box's @-completion uses, with its own query and its own
+                       Process - see Service's mention section.
 src/ImageViewer.qml    A picture from the transcript, with save-as.
 ```
 
@@ -60,8 +63,17 @@ Nothing goes back the other way except a command line and a stdin payload.
    before any of the user's file leaves - an API response is a better source
    than a message, but it is still somebody else naming where our data goes, and
    no token is attached there because that URL carries its own.
-3. **A message never chooses its own markup.** `slack.py` flattens mrkdwn to
-   text. The only tag the window ever builds is an `<a>` around text it escaped
+3. **A message never chooses its own markup.** This is about messages coming
+   *in*. The one thing that goes the other way is `escape_outgoing`: a message
+   being sent is escaped so a stray `<` cannot become somebody else's link, and
+   then exactly two shapes are restored - `<@U…>` and the three `<!here>`-style
+   broadcasts - because a mention *is* that form on the wire and the composer
+   completes into it. The pattern is deliberately tight and carries no `|label`
+   part, which is Slack's to write. Widening it means widening what a person's
+   own typing can turn into.
+
+   Incoming: `slack.py` flattens mrkdwn to text. The only tag the window ever
+   builds is an `<a>` around text it escaped
    itself, from an offset into that text. `http`, `https`, `mailto` only —
    checked in `slack.py`, again in `Model.js` where the anchor is written, and
    once more in `openUrl` before `xdg-open` sees it. Keep all three.

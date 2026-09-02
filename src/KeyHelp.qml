@@ -36,6 +36,7 @@ Column {
     ["1 - 9", "Pick that reaction, or take yours back", "Doing"],
     ["s / o", "In a picture: save a copy / open it elsewhere", "Doing"],
     ["Shift+Enter", "Send what you have typed", "Doing"],
+    ["@", "In the message box: start a mention. Tab or Enter completes", "Doing"],
     ["n or Ctrl-k", "Jump to any channel or person", "Doing"],
     ["/", "Search every message", "Doing"],
     ["f", "Filter the conversations already listed", "Doing"],

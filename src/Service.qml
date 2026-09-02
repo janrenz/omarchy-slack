@@ -1070,6 +1070,55 @@ Item {
     }
   }
 
+  // ---- mentions ------------------------------------------------------
+  //
+  // The same `directory` command the switcher runs, with its own query and its
+  // own Process. Not the switcher's: the rows it publishes are bound to a list
+  // on screen, and a mention lookup landing in them would repopulate a switcher
+  // somebody has open. One command, two callers, no shared state.
+  //
+  // The helper caches the workspace's people on disk and filters there, so a
+  // keystroke costs a local process and no round trip.
+  property var mentionPeople: []
+  property string mentionQuery: ""
+  property bool mentionLoading: false
+
+  function lookUpMention(query) {
+    var wanted = String(query || "")
+    // The lookup is debounced by the window; this guard is for the answer
+    // arriving after the fragment has moved on, which would otherwise offer
+    // matches for something nobody is typing any more.
+    mentionQuery = wanted
+    if (mentionProc.running || pluginDir === "" || !configured) return
+    mentionLoading = true
+    var command = ["python3", helper(), "directory", "--account", alias,
+                   "--query", wanted]
+    if (demo) command.push("--demo")
+    mentionProc.command = command
+    mentionProc.running = true
+  }
+
+  function clearMentions() {
+    mentionPeople = []
+    mentionQuery = ""
+  }
+
+  Process {
+    id: mentionProc
+    running: false
+    stdout: StdioCollector { id: mentionOut; waitForEnd: true }
+    stderr: StdioCollector { id: mentionErrOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.mentionLoading = false
+      var parsed = Model.parseJson(mentionOut.text, null)
+      // A directory that cannot be read is a completion that does not appear.
+      // Saying so under the composer would be a line of error text under
+      // somebody's half-typed sentence, for a feature they can do without.
+      root.mentionPeople = (exitCode === 0 && parsed && parsed.ok !== false)
+        ? (parsed.people || []) : []
+    }
+  }
+
   // Enter on a switcher row. Which of the three things it does is decided by
   // the row, not guessed at here.
   function jumpTo(row) {

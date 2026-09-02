@@ -2007,6 +2007,43 @@ def cmd_fetch(args):
 
 MENTION = re.compile(r"<@([UWB][A-Z0-9]{2,})")
 
+# The other direction. A message on its way out is escaped so that a stray `<`
+# somebody typed cannot become somebody else's link - see cmd_send - and that
+# escape also flattened the one piece of markup a person legitimately means to
+# send: a mention. Slack reads `<@U024BE7LH>` as a mention and `<!here>` as a
+# broadcast, and escaped they arrive as the literal text `&lt;@U024BE7LH&gt;`.
+#
+# So exactly those two shapes are let back through, and nothing else. The
+# pattern is deliberately tight - a user id or one of three names, and no
+# `|label` part, which is Slack's to write and not ours - because the whole
+# value of the escape is that everything it does not name stays literal.
+OUTGOING_MENTION = re.compile(r"&lt;(@[UWB][A-Z0-9]{2,}|![a-z]+)&gt;")
+
+# `<!subteam^...>` and the rest of Slack's bang forms are not offered by the
+# composer, so only these three are honoured. Anything else stays escaped
+# rather than being handed to Slack to interpret.
+BROADCASTS = ("!here", "!channel", "!everyone")
+
+
+def escape_outgoing(text):
+    """A message as Slack should read it: escaped, then mentions restored.
+
+    Slack escapes exactly three characters, and a message that does not escape
+    them can turn a stray `<` into somebody else's link. But the composer
+    completes a mention into Slack's own `<@U...>` form - that is what a mention
+    *is* on the wire - so the escape has to let those back out again, or every
+    completed mention arrives as visible punctuation instead of a name.
+    """
+    body = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def restore(found):
+        token = found.group(1)
+        if token.startswith("!") and token not in BROADCASTS:
+            return found.group(0)
+        return "<%s>" % token
+
+    return OUTGOING_MENTION.sub(restore, body)
+
 
 def mentioned_ids(messages):
     """Every person these messages point at, so they can be resolved in one go.
@@ -3127,9 +3164,7 @@ def cmd_send(args):
         fail("permission_required", scope_error(["chat:write"]))
     api = Slack(account["token"])
 
-    # Slack escapes exactly three characters, and a message that does not
-    # escape them can turn a stray `<` into somebody else's link.
-    body = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body = escape_outgoing(text)
     params = {"channel": args.channel, "text": body}
     if args.thread:
         params["thread_ts"] = args.thread

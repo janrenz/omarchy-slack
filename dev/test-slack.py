@@ -1905,6 +1905,63 @@ class Favourites(unittest.TestCase):
         self.assertEqual(problem, "")
 
 
+class OutgoingEscape(unittest.TestCase):
+    """A message on its way out, escaped - with mentions let back through.
+
+    Slack escapes exactly three characters and a message that does not escape
+    them can turn a stray `<` into somebody else's link. But a mention *is*
+    `<@U024BE7LH>` on the wire, so the composer's completed mentions arrived as
+    the literal text `&lt;@U024BE7LH&gt;` - visible punctuation instead of a
+    name. Exactly two shapes are restored, which is what keeps the escape worth
+    having.
+    """
+
+    def test_a_stray_angle_bracket_is_still_escaped(self):
+        self.assertEqual(slack.escape_outgoing("a < b and c > d"),
+                         "a &lt; b and c &gt; d")
+
+    def test_an_ampersand_is_still_escaped(self):
+        self.assertEqual(slack.escape_outgoing("plain & simple"), "plain &amp; simple")
+
+    def test_a_user_mention_survives(self):
+        self.assertEqual(slack.escape_outgoing("hi <@U024BE7LH> please look"),
+                         "hi <@U024BE7LH> please look")
+
+    def test_the_other_id_prefixes_survive_too(self):
+        # W is an enterprise user and B is a bot; both are ids a mention can name.
+        for token in ("<@W012ABC>", "<@B012ABC>"):
+            self.assertEqual(slack.escape_outgoing(token), token)
+
+    def test_the_three_broadcasts_survive(self):
+        for token in ("<!here>", "<!channel>", "<!everyone>"):
+            self.assertEqual(slack.escape_outgoing("shout " + token), "shout " + token)
+
+    def test_any_other_bang_form_stays_escaped(self):
+        # Slack has more of them - subteam, date - and none are offered by the
+        # composer, so none are handed to Slack to interpret.
+        self.assertEqual(slack.escape_outgoing("<!subteam^S123>"),
+                         "&lt;!subteam^S123&gt;")
+        self.assertEqual(slack.escape_outgoing("<!date^1234^{date}>"),
+                         "&lt;!date^1234^{date}&gt;")
+
+    def test_a_label_part_stays_escaped_because_it_is_slacks_to_write(self):
+        self.assertEqual(slack.escape_outgoing("<@U024BE7LH|jan>"),
+                         "&lt;@U024BE7LH|jan&gt;")
+
+    def test_something_that_only_looks_like_an_id_stays_escaped(self):
+        self.assertEqual(slack.escape_outgoing("<@lowercase>"), "&lt;@lowercase&gt;")
+        self.assertEqual(slack.escape_outgoing("<@U1>"), "&lt;@U1&gt;")
+
+    def test_a_link_somebody_typed_is_still_not_a_link(self):
+        self.assertEqual(slack.escape_outgoing("<https://evil/|click>"),
+                         "&lt;https://evil/|click&gt;")
+
+    def test_several_mentions_in_one_message_all_survive(self):
+        self.assertEqual(
+            slack.escape_outgoing("<@U024BE7LH> and <@U024BE7LX>, see <!here>"),
+            "<@U024BE7LH> and <@U024BE7LX>, see <!here>")
+
+
 class SigningOut(unittest.TestCase):
     """Sign out has to leave nothing behind that says otherwise.
 

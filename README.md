@@ -311,6 +311,7 @@ focus".
 | `1` – `9` | Pick that reaction. The one you already gave takes it back |
 | `s` / `o` | In a picture: save a copy / open it elsewhere |
 | `Shift+Enter` or `Ctrl+Enter` | Send. Plain `Enter` is a newline |
+| `@` | In the message box: start a mention. `↓`/`↑` move, `Tab` or `Enter` completes, `Escape` closes the list |
 | `n`, or `Ctrl-k` | Jump to any channel or person — `Ctrl-k` works from inside the message box too |
 | `/` | Search every message |
 | `f` | Filter the conversations already listed |
@@ -321,6 +322,30 @@ focus".
 | `e` | In a canvas: write in it |
 | `,` | Settings |
 | `?` | This list |
+
+### Mentioning somebody
+
+Type `@` in the message box and the workspace's people are offered under it,
+matched on handle and on name — a handle that starts with what you typed comes
+first, since that is what an `@` is reaching for. `↓`/`↑` move, `Tab` or `Enter`
+completes, `Escape` puts the list away and leaves the text alone. `@here`,
+`@channel` and `@everyone` are offered alongside the people, in the accent
+colour, because they are a louder thing to reach for.
+
+An `@` only starts a mention at the beginning of a word, so `mail me at
+jan@fwu.de` is left alone.
+
+What goes into the box is Slack's own form — `<@U024BE7LH>` — because that is
+what a mention *is* on the wire; the name is only what Slack renders it as.
+That also means the outgoing escape has to let it back out: a message is
+escaped so a stray `<` you typed cannot become somebody else's link, and
+exactly two shapes are restored afterwards, a user id and those three
+broadcasts. Anything else with angle brackets in it stays literal.
+
+The list of people is the same one `Ctrl-k` searches, cached on disk by the
+helper and filtered there, so typing a name is a local process and not a
+request to Slack. Without the `users:read` scope there is nothing to offer and
+no list appears.
 
 ## Settings
 
@@ -652,6 +677,20 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.6.0 — 2026-09-02
+
+- **Typing `@` in the message box offers the workspace's people.** `↓`/`↑`
+  move, `Tab` or `Enter` completes, `Escape` closes the list. `@here`,
+  `@channel` and `@everyone` come with them. An `@` only counts at the start of
+  a word, so an email address in a sentence is left alone.
+- **Under it, a completed mention now survives being sent.** A message is
+  escaped on the way out so a stray `<` cannot turn into somebody else's link,
+  and that escape also flattened the one piece of markup a person means to
+  send: a mention is `<@U024BE7LH>` on the wire, and it arrived as the literal
+  text `&lt;@U024BE7LH&gt;`. Exactly two shapes are restored now — a user id,
+  and those three broadcasts — and everything else with angle brackets in it
+  stays literal, which is the whole value of the escape.
 
 ### 0.5.0 — 2026-09-02
 

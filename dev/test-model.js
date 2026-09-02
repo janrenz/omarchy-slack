@@ -21,7 +21,8 @@ const Model = new Function(
     "escapeHtml, usableSpans, safeHref, densityScale, densityNames, sortNames, reactionIsMine, " +
     "presenceColor, presenceLabel, presenceWanted, presenceWantedFromRows, " +
     "switcherRows, searchRows, fileLabel, " +
-    "threadLabel, coverageLabel, previewMarkdown, canvasNote }"
+    "threadLabel, coverageLabel, previewMarkdown, canvasNote, " +
+    "mentionSpan, insertMention, mentionRows }"
 )()
 
 let passed = 0
@@ -585,6 +586,102 @@ test("a canvas says why it cannot be rewritten here", () => {
        .indexOf("a picture") !== -1)
   ok(Model.canvasNote({ canWrite: true, markdown: "x", truncated: true, lossy: [] })
        .indexOf("longer than") !== -1)
+})
+
+// ----------------------------------------------------------------
+// mentions, while they are being typed
+//
+// A composer is not a To field: there is no separator, and an @ in the middle
+// of a word is almost always an email address. Getting that wrong turns
+// "mail me at jan@fwu.de" into a suggestion list, which is the whole reason
+// these are worth pinning down.
+
+const span = (text, cursor) => Model.mentionSpan(text, cursor)
+
+test("an @ at the start of the text is a mention", () => {
+  eq(span("@ja", 3), { start: 0, end: 3, query: "ja" })
+})
+
+test("an @ after a space is a mention", () => {
+  eq(span("hi @ja", 6), { start: 3, end: 6, query: "ja" })
+})
+
+test("an @ after an opening bracket is one too", () => {
+  eq(span("(@ja", 4), { start: 1, end: 4, query: "ja" })
+})
+
+test("an email address is left alone", () => {
+  eq(span("mail me at jan@fwu.de", 21), null)
+  eq(span("jan@fwu.de", 10), null)
+})
+
+test("the whole word is the fragment, even the part past the caret", () => {
+  // Somebody went back to fix the middle of a name they mistyped.
+  eq(span("hi @jan there", 6), { start: 3, end: 7, query: "jan" })
+})
+
+test("a caret past the end of the word is not in the mention any more", () => {
+  eq(span("hi @jan there", 9), null)
+})
+
+test("text with no @ in it is not a mention", () => {
+  eq(span("plain text", 10), null)
+  eq(span("", 0), null)
+})
+
+test("a completed mention replaces what was typed and leaves a space", () => {
+  const at = span("hi @ja", 6)
+  eq(Model.insertMention("hi @ja", at, "@U1"), { text: "hi <@U1> ", cursor: 9 })
+})
+
+test("and does not push a second space into the middle of a sentence", () => {
+  const at = span("hi @ja there", 6)
+  eq(Model.insertMention("hi @ja there", at, "@U1"), { text: "hi <@U1> there", cursor: 8 })
+})
+
+test("nothing being typed is nothing to insert", () => {
+  eq(Model.insertMention("hi", null, "@U1"), { text: "hi", cursor: 2 })
+})
+
+const PEOPLE = [
+  { id: "U1", handle: "jan", name: "Jan Renz", title: "Platform" },
+  { id: "U2", handle: "marijana", name: "Marijana Jansen", title: "" },
+  { id: "U3", handle: "kr", name: "Klaus Renz", title: "" }
+]
+
+test("a handle that starts with it comes before a name that contains it", () => {
+  eq(Model.mentionRows(PEOPLE, "ja", 8).map((r) => r.handle),
+     ["jan", "marijana"])
+})
+
+test("any word of a name counts, not only the first", () => {
+  eq(Model.mentionRows(PEOPLE, "renz", 8).map((r) => r.handle), ["jan", "kr"])
+})
+
+test("what goes into the text is the id, because that is what a mention is", () => {
+  eq(Model.mentionRows(PEOPLE, "jan", 8)[0].token, "@U1")
+})
+
+test("the broadcasts are offered and carry their own bang", () => {
+  const here = Model.mentionRows(PEOPLE, "here", 8)
+  eq(here.map((r) => r.handle), ["here"])
+  eq(here[0].token, "!here")
+  ok(here[0].broadcast === true)
+})
+
+test("with nothing typed the people come before the broadcasts", () => {
+  // @channel is a loud thing to hit by accident on a bare @.
+  const rows = Model.mentionRows(PEOPLE, "", 8)
+  eq(rows.slice(0, 3).map((r) => r.handle), ["jan", "marijana", "kr"])
+  ok(rows[3].broadcast === true)
+})
+
+test("nobody matching is an empty list rather than everybody", () => {
+  eq(Model.mentionRows(PEOPLE, "zzz", 8), [])
+})
+
+test("the limit is honoured", () => {
+  eq(Model.mentionRows(PEOPLE, "", 2).length, 2)
 })
 
 // ----------------------------------------------------------------

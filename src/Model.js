@@ -744,3 +744,121 @@ function groupMessages(messages, meId, now) {
   }
   return groups
 }
+
+// --------------------------------------------------------------------------
+// mentions, while they are being typed
+// --------------------------------------------------------------------------
+//
+// Slack's mention is `<@U024BE7LH>` on the wire, not `@name` - the name is
+// only what Slack renders it as, and it resolves the id. So the composer
+// completes an `@` into that form, `slack.py`'s escape_outgoing lets it back
+// out through the outgoing escape, and what is typed and what is sent are two
+// different strings. Everything below is what decides where one ends.
+//
+// The three broadcast forms are offered alongside people because `@here` is
+// the most-typed mention there is, and it is the same insertion with a
+// different token.
+var BROADCAST_MENTIONS = [
+  { id: "!here", handle: "here", name: "Everyone here now",
+    title: "Notifies the people currently active in this channel", broadcast: true },
+  { id: "!channel", handle: "channel", name: "Everyone in this channel",
+    title: "Notifies every member, active or not", broadcast: true },
+  { id: "!everyone", handle: "everyone", name: "Everyone in the workspace",
+    title: "Only works in #general", broadcast: true }
+]
+
+// The `@…` the caret is sitting in, or null.
+//
+// A composer is not a To field: there is no separator to split on, and an `@`
+// anywhere in a paragraph is usually part of an email address rather than the
+// start of a mention. So the `@` has to begin a word - the start of the text,
+// or after whitespace or an opening bracket - and the caret has to be inside
+// what follows it. Anything with an `@` behind it and no space in front is
+// somebody's address and is left alone.
+function mentionSpan(text, cursor) {
+  var value = String(text || "")
+  var at = Math.max(0, Math.min(value.length, Number(cursor)))
+  var start = -1
+  for (var i = at - 1; i >= 0; i--) {
+    var character = value.charAt(i)
+    if (character === "@") { start = i; break }
+    // A mention is one word. Anything that could not be part of a handle ends
+    // the search rather than being scanned past.
+    if (!/[A-Za-z0-9._'-]/.test(character)) return null
+  }
+  if (start < 0) return null
+  if (start > 0 && !/[\s(\[{]/.test(value.charAt(start - 1))) return null
+  // Where the word ends, which may be past the caret if somebody went back to
+  // fix the middle of a name.
+  var end = start + 1
+  while (end < value.length && /[A-Za-z0-9._'-]/.test(value.charAt(end))) end += 1
+  if (at > end) return null
+  return { start: start, end: end, query: value.slice(start + 1, end) }
+}
+
+// The completed mention in place of what was typed, and where the caret goes.
+//
+// A trailing space, because a mention is never the last thing in a sentence
+// that needed one - and without it the next word types straight onto the
+// closing bracket, where Slack reads it as part of the id.
+function insertMention(text, span, token) {
+  var value = String(text || "")
+  if (!span) return { text: value, cursor: value.length }
+  var head = value.slice(0, span.start)
+  var tail = value.slice(span.end)
+  // ...unless there is already one there: completing a name in the middle of a
+  // sentence should not push a second space into it.
+  var inserted = "<" + String(token) + ">" + (/^\s/.test(tail) ? "" : " ")
+  return { text: head + inserted + tail, cursor: head.length + inserted.length }
+}
+
+// The people and broadcasts matching what has been typed after the `@`.
+//
+// The helper has already filtered and sorted its side by name; this ranks the
+// two lists together, and puts a handle that *starts* with the fragment first,
+// because a handle is what somebody typing an @ is reaching for.
+function mentionRows(people, query, limit) {
+  var needle = String(query || "").toLowerCase()
+  var rows = []
+  var candidates = (people || []).concat(BROADCAST_MENTIONS)
+  for (var i = 0; i < candidates.length; i++) {
+    var person = candidates[i]
+    if (!person || !person.id) continue
+    var handle = String(person.handle || "").toLowerCase()
+    var name = String(person.name || "").toLowerCase()
+    var rank
+    if (needle === "") {
+      // Nothing typed yet: people the helper already ranked, then the
+      // broadcasts, which are a louder thing to reach for by accident.
+      rank = person.broadcast === true ? 3 : 1
+    } else if (handle.indexOf(needle) === 0) rank = 0
+    else if (mentionWordStart(name, needle)) rank = 1
+    else if (handle.indexOf(needle) >= 0 || name.indexOf(needle) >= 0) rank = 2
+    else continue
+    rows.push({
+      id: String(person.id),
+      // What goes into the text. A person is `@id`; a broadcast already
+      // carries its own bang.
+      token: person.broadcast === true ? String(person.id) : "@" + String(person.id),
+      handle: String(person.handle || ""),
+      name: String(person.name || ""),
+      title: String(person.title || ""),
+      broadcast: person.broadcast === true,
+      rank: rank,
+      order: i
+    })
+  }
+  rows.sort(function(a, b) {
+    if (a.rank !== b.rank) return a.rank - b.rank
+    return a.order - b.order
+  })
+  return rows.slice(0, Number(limit || 8))
+}
+
+function mentionWordStart(name, needle) {
+  if (name === "") return false
+  var words = name.split(/[\s.,'"()-]+/)
+  for (var i = 0; i < words.length; i++)
+    if (words[i] !== "" && words[i].indexOf(needle) === 0) return true
+  return false
+}

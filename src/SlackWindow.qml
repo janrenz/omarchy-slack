@@ -548,6 +548,89 @@ Item {
     keyCatcher.forceActiveFocus()
   }
 
+  // ---- mentions -----------------------------------------------------------
+  //
+  // Typing `@` in the composer offers the workspace's people. What goes into
+  // the text is Slack's own `<@U024BE7LH>` - a mention *is* an id on the wire,
+  // and the name is only what Slack renders it as - so what is typed and what
+  // is sent are two different strings, and slack.py's escape_outgoing is what
+  // lets the finished form back out through the outgoing escape.
+  //
+  // The caret is what says whether a mention is being typed, and a TextArea
+  // raises no signal for the caret moving on its own, so it is read after
+  // every text and cursor change rather than bound.
+  property int composerCaret: 0
+  property int mentionCursor: 0
+  // Dismissed for the fragment currently under the caret, so Escape can put
+  // the list away without also leaving the composer. Cleared by the fragment
+  // changing, which is a new question.
+  property string mentionDismissed: ""
+
+  readonly property var mentionTyping: Model.mentionSpan(service.draft, composerCaret)
+
+  readonly property var mentionRows: {
+    if (!mentionTyping || !service.canPost) return []
+    if (mentionDismissed === mentionKey) return []
+    return Model.mentionRows(service.mentionPeople, mentionTyping.query, 8)
+  }
+
+  // What is being completed, as one value to compare against - the query alone
+  // would make two different `@ja`s in one draft the same question.
+  readonly property string mentionKey: mentionTyping
+    ? (String(mentionTyping.start) + ":" + mentionTyping.query) : ""
+
+  function noteComposerCaret() {
+    composerCaret = composer.cursorPosition
+  }
+
+  onMentionKeyChanged: {
+    mentionCursor = 0
+    if (mentionKey === "") { service.clearMentions(); return }
+    mentionDismissed = ""
+    // Debounced: a lookup per keystroke is a process per keystroke, and the
+    // helper filters a cached directory rather than asking Slack - but there is
+    // no reason to start six of them while somebody types a name.
+    mentionDebounce.restart()
+  }
+
+  Timer {
+    id: mentionDebounce
+    interval: 160
+    onTriggered: {
+      if (!root.mentionTyping) return
+      service.lookUpMention(root.mentionTyping.query)
+    }
+  }
+
+  function stepMention(step) {
+    var rows = mentionRows
+    if (rows.length === 0) return
+    mentionCursor = (mentionCursor + step + rows.length) % rows.length
+  }
+
+  function dismissMentions() {
+    mentionDismissed = mentionKey
+  }
+
+  function acceptMention(row) {
+    if (!row || !mentionTyping) return
+    var result = Model.insertMention(service.draft, mentionTyping, row.token)
+    // Through the draft, never by assigning composer.text: the composer binds
+    // its text to the draft, and assigning it breaks that binding for good -
+    // after which a draft set from anywhere else (an agent's, or the clear
+    // after a send) would never reach the box again.
+    service.draft = result.text
+    // After the binding has carried the text across. Setting the caret first
+    // puts it in the old, shorter string, and Qt clamps it.
+    var wanted = result.cursor
+    Qt.callLater(function() {
+      composer.cursorPosition = wanted
+      root.composerCaret = wanted
+    })
+    mentionCursor = 0
+    service.clearMentions()
+  }
+
   FloatingWindow {
     id: window
     title: service.openConversation
@@ -2551,6 +2634,94 @@ Item {
                 }
 
                 // ---------------- answering ----------------
+                //
+                // The mention list sits ABOVE the composer, not under it: the
+                // composer is the bottom of the window, and a list below it
+                // would be off the screen.
+                Column {
+                  id: mentionList
+                  width: parent.width
+                  visible: root.mentionRows.length > 0 && composer.activeFocus
+                  spacing: Style.spacing.xxs
+
+                  Repeater {
+                    model: root.mentionRows
+
+                    Rectangle {
+                      id: mentionRow
+                      required property var modelData
+                      required property int index
+
+                      width: mentionList.width
+                      implicitHeight: mentionLine.implicitHeight + Style.spacing.sm
+                      height: implicitHeight
+                      radius: Style.space(4)
+                      color: root.mentionCursor === mentionRow.index
+                        ? Util.alpha(Color.accent, 0.16)
+                        : (mentionHover.containsMouse
+                           ? Util.alpha(Color.foreground, 0.07) : "transparent")
+
+                      Row {
+                        id: mentionLine
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.leftMargin: Style.spacing.sm
+                        anchors.rightMargin: Style.spacing.sm
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.spacing.sm
+
+                        Text {
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: "@" + mentionRow.modelData.handle
+                          textFormat: Text.PlainText
+                          // A broadcast is a louder thing than a person, and
+                          // the accent is the only warning the row can carry.
+                          color: mentionRow.modelData.broadcast
+                            ? Color.accent : Color.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                        }
+
+                        Text {
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: mentionRow.modelData.name
+                          textFormat: Text.PlainText
+                          elide: Text.ElideRight
+                          color: Qt.darker(Color.foreground, 1.4)
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          width: Math.min(implicitWidth, mentionLine.width * 0.45)
+                        }
+
+                        Text {
+                          anchors.verticalCenter: parent.verticalCenter
+                          visible: String(mentionRow.modelData.title || "") !== ""
+                          text: mentionRow.modelData.title
+                          textFormat: Text.PlainText
+                          elide: Text.ElideRight
+                          color: Qt.darker(Color.foreground, 1.8)
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          width: Math.max(0, mentionLine.width - x)
+                        }
+                      }
+
+                      MouseArea {
+                        id: mentionHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onEntered: root.mentionCursor = mentionRow.index
+                        onClicked: {
+                          root.acceptMention(mentionRow.modelData)
+                          composer.forceActiveFocus()
+                        }
+                      }
+                    }
+                  }
+                }
+
                 Rectangle {
                   id: composerBox
                   width: parent.width
@@ -2581,7 +2752,10 @@ Item {
                       font.pixelSize: Style.font.body
                       background: null
                       text: service.draft
-                      onTextChanged: if (text !== service.draft) service.draft = text
+                      onTextChanged: {
+                        if (text !== service.draft) service.draft = text
+                        root.noteComposerCaret()
+                      }
                       // Enter is a newline; Shift+Enter sends, and Ctrl+Enter
                       // still does too for anyone with it in their fingers. A
                       // chat box that sends on Enter alone posts half-written
@@ -2590,7 +2764,44 @@ Item {
                       // Escape and Tab hand the keyboard back to the
                       // conversation, since the key catcher cannot hear
                       // anything while this has focus.
+                      // The caret is what says whether a mention is being
+                      // typed, and a TextArea raises no signal for the caret
+                      // moving on its own - so it is read after every change
+                      // rather than bound. The text's own handler above does
+                      // the same, since typing moves both.
+                      onCursorPositionChanged: root.noteComposerCaret()
+
                       Keys.onPressed: function(event) {
+                        // The mention list first, and only while it is up: the
+                        // keys it wants are the same ones that otherwise leave
+                        // the composer or send the message.
+                        if (root.mentionRows.length > 0) {
+                          if (event.key === Qt.Key_Down) {
+                            root.stepMention(1); event.accepted = true; return
+                          }
+                          if (event.key === Qt.Key_Up) {
+                            root.stepMention(-1); event.accepted = true; return
+                          }
+                          // Tab completes, and so does a bare Enter - which is
+                          // a newline here, and newlines are not what somebody
+                          // halfway through a name is asking for. Shift+Enter
+                          // is still Send, so a message can be posted with the
+                          // list open.
+                          if (event.key === Qt.Key_Tab
+                              || ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                  && !(event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)))) {
+                            root.acceptMention(root.mentionRows[root.mentionCursor])
+                            event.accepted = true
+                            return
+                          }
+                          // The first Escape puts the list away and leaves the
+                          // text alone; a second one leaves the composer.
+                          if (event.key === Qt.Key_Escape) {
+                            root.dismissMentions()
+                            event.accepted = true
+                            return
+                          }
+                        }
                         if (event.key === Qt.Key_Escape || event.key === Qt.Key_Backtab
                             || event.key === Qt.Key_Tab) {
                           root.leaveComposer()
