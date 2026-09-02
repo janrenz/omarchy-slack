@@ -1704,5 +1704,55 @@ class Favourites(unittest.TestCase):
         self.assertEqual(problem, "")
 
 
+class SigningOut(unittest.TestCase):
+    """Sign out has to leave nothing behind that says otherwise.
+
+    The bug: the token was deleted and the finished snapshot was not, so the
+    next fetch handed the snapshot back, the window went on drawing a
+    signed-in workspace, and the box you paste a token into never appeared.
+    """
+
+    def workspace(self, cache, state):
+        slack.CACHE_DIR = cache
+        slack.STATE_DIR = state
+        os.makedirs(os.path.join(cache, "work", "transcripts"), exist_ok=True)
+        os.makedirs(state, exist_ok=True)
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"at": time.time(),
+                          "snapshot": {"ok": True, "accounts": [{"ok": True, "team": "Somewhere"}]}})
+        for name in ("previews.json", "list.json", "threads.json", "marks.json"):
+            slack.write_json(slack.cache_path("work", name), {"kept": True})
+        slack.write_json(slack.cache_path("work", "transcripts/C1.json"), {"kept": True})
+        slack.write_json(slack.state_path("work"), {"token": "xoxp-test"})
+
+    def test_a_snapshot_is_not_handed_over_once_the_token_is_gone(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as state:
+            self.workspace(cache, state)
+            # With the token there, the cache is exactly what it is for.
+            self.assertIsNotNone(slack.cached_snapshot("work", max_age=900))
+            os.remove(slack.state_path("work"))
+            # Without it, there is nothing this could be a copy of.
+            self.assertIsNone(slack.cached_snapshot("work", max_age=900))
+
+    def test_signing_out_forgets_every_cache_and_not_three_files(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as state:
+            self.workspace(cache, state)
+            args = Args()
+            args.account = "work"
+            self.assertTrue(capture(slack.cmd_remove, args)["removed"])
+            self.assertFalse(os.path.exists(slack.state_path("work")))
+            self.assertFalse(os.path.exists(os.path.join(cache, "work")))
+
+    def test_signing_out_of_a_workspace_that_was_never_in_says_so_quietly(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as state:
+            slack.CACHE_DIR = cache
+            slack.STATE_DIR = state
+            args = Args()
+            args.account = "work"
+            answer = capture(slack.cmd_remove, args)
+            self.assertTrue(answer["ok"])
+            self.assertFalse(answer["removed"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

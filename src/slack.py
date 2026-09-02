@@ -1903,7 +1903,15 @@ def cached_snapshot(alias, max_age=0, since=0.0):
     caller that waited on somebody else's poll: anything written after that
     moment is that poll's answer, and is handed over whatever `max_age` said -
     zero means "nothing stale", not "make the request again".
+
+    A workspace with no token has nothing this could be a copy of. Handing one
+    over anyway is what made Sign out look broken: the token was gone, the
+    snapshot said "signed in to Grünwald 49ers", and the window went on drawing
+    a signed-in workspace for up to a quarter of an hour - which is exactly the
+    quarter of an hour somebody is trying to paste a new token into it.
     """
+    if not os.path.exists(state_path(alias)):
+        return None
     cached = read_json(cache_path(alias, "snapshot.json"), None)
     if not cached:
         return None
@@ -3275,16 +3283,45 @@ def cmd_list(_args):
 
 
 def cmd_remove(args):
-    """Forget a workspace: the token, and everything cached about it."""
+    """Forget a workspace: the token, and everything cached about it.
+
+    Everything, not a list of three files. It used to name users.json,
+    channels.json and marks.json and leave the rest, which meant the finished
+    snapshot, the previews, the conversation list, the local thread marks and
+    every cached transcript survived a sign-out - so signing in again, even to
+    a different workspace, inherited the last one's cached content, and the
+    snapshot went on claiming the old workspace was signed in.
+
+    `cache_path` refuses an alias that is not a plain name, so the directory
+    this walks is always one directory below CACHE_DIR.
+    """
     removed = False
     path = state_path(args.account)
     if os.path.exists(path):
         os.remove(path)
         removed = True
-    for name in ("users.json", "channels.json", "marks.json"):
-        cached = cache_path(args.account, name)
-        if os.path.exists(cached):
-            os.remove(cached)
+
+    # Anchored on cache_path so the alias goes through the same check every
+    # other cache read does, rather than being joined onto CACHE_DIR here.
+    folder = os.path.dirname(cache_path(args.account, "snapshot.json"))
+    for base, directories, files in os.walk(folder, topdown=False):
+        for name in files:
+            try:
+                os.remove(os.path.join(base, name))
+            except OSError:
+                pass
+        for name in directories:
+            try:
+                os.rmdir(os.path.join(base, name))
+            except OSError:
+                pass
+    try:
+        os.rmdir(folder)
+    except OSError:
+        # Something in it could not be removed, or it was never there. Neither
+        # is worth failing a sign-out over: the token is what signs you in, and
+        # the token is gone.
+        pass
     out({"ok": True, "removed": removed})
 
 

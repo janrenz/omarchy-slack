@@ -1145,7 +1145,12 @@ Item {
       root.snapshot = null
       root.closeConversation()
       root.signInMessage = ""
-      root.refresh()
+      // Nothing on disk is worth believing about a workspace that has just
+      // been signed out of, and this is the one refresh where being told the
+      // truth matters more than being told quickly: the token box only appears
+      // once the answer says nobody is signed in.
+      root.painted = false
+      root.refresh({ fresh: true })
     }
   }
 

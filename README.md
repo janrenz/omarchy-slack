@@ -604,6 +604,23 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.4.2 — 2026-09-02
+
+- **Fixed: Sign out left the window still signed in, so a new token could not
+  be pasted.** The token was deleted, and the finished snapshot on disk was
+  not - so the next fetch handed that back instead of asking, the window went
+  on drawing the workspace it had just been signed out of, and the box you
+  paste a token into never appeared. It could stay that way for a quarter of an
+  hour, which is exactly the quarter of an hour somebody is trying to paste a
+  token. A cached snapshot for a workspace with no token is now refused
+  outright: it is a copy of an answer, and without a token there is nothing it
+  can be a copy of. Signing out also re-reads from Slack rather than from disk.
+- **And signing out now forgets everything, not three files.** It named
+  `users.json`, `channels.json` and `marks.json` and left the snapshot, the
+  previews, the conversation list, the local thread marks and every cached
+  transcript behind - so signing in again, even to a different workspace,
+  inherited the last one's cached content.
+
 ### 0.4.1 — 2026-09-02
 
 - **The poll spends one search instead of three.** `search.messages` is the one
