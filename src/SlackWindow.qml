@@ -64,7 +64,13 @@ Item {
       // Only when actually switching: re-anchoring the conversation already on
       // screen would re-read it on every click of the same notification, and
       // would take the reader back down to it after they had scrolled away.
-      if (switching) service.openById(conversation, "", "", message)
+      // The name and kind, when whoever summoned us knew them - the bar's
+      // dropdown does, having just drawn the row. Worth carrying: a summon
+      // that mounts the window arrives before the first poll, so without them
+      // the header has nothing to say until the sidebar lands.
+      if (switching)
+        service.openById(conversation, String(payload.title || ""),
+                         String(payload.kind || ""), message)
       var thread = String(payload.thread || "")
       if (thread !== "" && String(service.threadTs) !== thread)
         service.openThread(thread, null)

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "janrenz.omarchy.slack",
   "name": "Slack",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "author": "Jan Renz",
   "license": "MIT",
   "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Needs python3 (standard library only) and a Slack app of yours - see the README. Talks to the Slack Web API and nothing else.",
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Slack",
-    "description": "Unread conversations in the bar; the channels and DMs open in their own window.",
+    "description": "Unread conversations in a dropdown behind the bar icon; the channels and DMs open in their own window.",
     "category": "Communication",
     "aliases": [
       "slack",
@@ -126,6 +126,12 @@
         "type": "string",
         "label": "Bar label",
         "description": "Short text shown instead of the icon, e.g. SLACK."
+      },
+      {
+        "key": "ipcTarget",
+        "type": "string",
+        "label": "Keybinding name for the dropdown",
+        "description": "A name of your own for this widget's dropdown, so a key can summon it: set slack here and bind `omarchy-shell slack toggle`. Empty means the dropdown opens by clicking the icon alone. The window is separate and always answers to `omarchy-shell shell toggle janrenz.omarchy.slack`."
       },
       {
         "key": "tintOnUnread",

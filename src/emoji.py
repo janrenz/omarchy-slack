@@ -67,6 +67,9 @@ EMOJI = {
     "green_heart": "\U0001F49A", "blue_heart": "\U0001F499", "purple_heart": "\U0001F49C",
     "black_heart": "\U0001F5A4", "white_heart": "\U0001F90D", "broken_heart": "\U0001F494",
     "sparkling_heart": "\U0001F496", "heartpulse": "\U0001F497",
+    # The card suits, which are not the hearts above them: `:hearts:` is the
+    # suit and `:heart:` is the feeling, and a workspace reacts with both.
+    "hearts": "♥️", "spades": "♠️", "clubs": "♣️", "diamonds": "♦️",
     "star": "⭐", "star2": "\U0001F31F", "sparkles": "✨", "boom": "\U0001F4A5",
     "fire": "\U0001F525", "zap": "⚡", "dizzy": "\U0001F4AB", "100": "\U0001F4AF",
     "white_check_mark": "✅", "heavy_check_mark": "✔️",
@@ -177,8 +180,18 @@ SHORTCODE = re.compile(r":([a-z0-9_+\-']{1,64}):")
 
 
 def char_for(name):
-    """The character `:name:` stands for, or "" if this table has never heard of it."""
-    return EMOJI.get(str(name or "").strip().lower().strip(":"), "")
+    """The character `:name:` stands for, or "" if this table has never heard of it.
+
+    A reaction carries its skin tone welded on with a double colon -
+    `ok_hand::skin-tone-2` - rather than as the separate shortcode a message
+    body uses. Looked up whole, every toned hand in a workspace missed the
+    table and drew as the text `:ok_hand:`, which is the one case where the
+    name-instead-of-a-picture fallback is wrong: the emoji is right there, only
+    spelled with a modifier this table does not keep. So the modifier comes off
+    before the lookup, the same way `expand` takes it out of a sentence.
+    """
+    base = str(name or "").strip().lower().strip(":").split("::")[0]
+    return EMOJI.get(base, "")
 
 
 def expand(text):

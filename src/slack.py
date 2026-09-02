@@ -2996,6 +2996,13 @@ def one_of(phrases):
 # back and forth between two channels is free, short enough that a channel
 # opened again after a coffee is read afresh.
 TRANSCRIPT_TTL = 90
+# What built the payload on disk. A transcript is kept as the rows the window
+# draws rather than as Slack's own answer, so a change to how a row is built -
+# the emoji table most of all - leaves every record on disk a version behind,
+# and `seen` cannot notice: a quiet conversation's witness never moves, so it
+# stays "current" for good and goes on drawing what the old code drew. Bumping
+# this retires them. 1 is the unversioned era, which is why this starts at 2.
+RENDER_VERSION = 2
 # A thread has a coarser witness than a channel: `seen` moving says something
 # was said in the conversation, not which thread it was said in. So a thread's
 # transcript is worth only its age, and little of it - a thread is usually
@@ -3049,6 +3056,7 @@ def save_transcript(alias, channel, thread, payload, top, avatars):
     write_json(path, {"at": time.time(), "newest": newest,
                       "seen": poll_seen(alias, channel),
                       "top": int(top), "avatars": bool(avatars),
+                      "render": RENDER_VERSION,
                       "payload": payload})
 
 
@@ -3088,6 +3096,9 @@ def drop_transcript(alias, channel):
 def transcript_is_current(alias, channel, thread, cached, top, avatars):
     """Whether what is on disk can be handed over without asking Slack."""
     if not cached or not isinstance(cached.get("payload"), dict):
+        return False
+    # Written by code that shaped a row differently - see RENDER_VERSION.
+    if int(cached.get("render") or 0) != RENDER_VERSION:
         return False
     age = time.time() - float(cached.get("at") or 0)
     # A clock that went backwards, which a laptop's does across a suspend.

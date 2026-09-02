@@ -251,9 +251,24 @@ Item {
   // find, because what it looked like was the demo fixtures being ignored.
   function scheduleRefresh() { Qt.callLater(refresh) }
 
-  onConfiguredChanged: if (configured) { loadPalette(); loadReactionChoices(); scheduleRefresh() }
-  onPluginDirChanged: if (configured) { loadPalette(); loadReactionChoices(); scheduleRefresh() }
-  onSettingsChanged: if (configured) scheduleRefresh()
+  // Each of these is a way the workspace can have just become known, and a
+  // conversation opened before it was is waiting on exactly that. Replayed
+  // from the state the open left behind, so a deep link that named a thread or
+  // anchored on a message still lands where it was pointed. Never `fresh`:
+  // that belongs to a reload of a transcript already on screen, which is not
+  // what a conversation still waiting to be read for the first time is.
+  function flushQueuedMessages() {
+    if (messagesQueued && openConversation)
+      fetchMessages(openConversation, threadTs, anchorTs)
+  }
+
+  onConfiguredChanged: if (configured) {
+    loadPalette(); loadReactionChoices(); scheduleRefresh(); flushQueuedMessages()
+  }
+  onPluginDirChanged: if (configured) {
+    loadPalette(); loadReactionChoices(); scheduleRefresh(); flushQueuedMessages()
+  }
+  onSettingsChanged: if (configured) { scheduleRefresh(); flushQueuedMessages() }
 
   // ---- telling you something arrived -------------------------------------
 
@@ -298,7 +313,23 @@ Item {
   // What was open goes with it. A conversation left on screen after the token
   // stopped working is a window still headed "#platform" over a sign-in box,
   // which is the one moment it matters that the header says where you are.
-  onAliasChanged: { notifier.forget(); snapshot = null; closeConversation() }
+  //
+  // Arriving at the first workspace is not a switch, though, and treating it
+  // as one threw away every deep link that had to mount the window: a summon
+  // applies its payload straight away - a clicked toast, a row in the bar's
+  // dropdown - while the name is still a subprocess away, so the conversation
+  // was opened against no workspace and then closed by the name turning up.
+  // What the window showed was "Pick a conversation", which reads exactly like
+  // a link that was never followed. Only a *change* of workspace closes
+  // anything.
+  property string lastAlias: ""
+
+  onAliasChanged: {
+    var switched = lastAlias !== "" && lastAlias !== alias
+    lastAlias = alias
+    notifier.forget()
+    if (switched) { snapshot = null; closeConversation() }
+  }
   onSignedInChanged: if (!signedIn) { notifier.forget(); closeConversation() }
 
   function announceNew() {
@@ -374,6 +405,8 @@ Item {
   property var messages: []
   property bool messagesLoading: false
   property string messagesError: ""
+  // An open waiting on a workspace name - see fetchMessages.
+  property bool messagesQueued: false
   // The message a search result asked to be shown, so the transcript can say
   // which one it jumped to.
   property string anchorTs: ""
@@ -400,6 +433,16 @@ Item {
     if (!row) return
     messagesError = ""
     messagesLoading = true
+    // A conversation asked for before the settings arrived. The window is
+    // summoned by a clicked toast or a row in the bar's dropdown and applies
+    // the payload straight away, while the workspace name is still a
+    // subprocess away - and the helper answers a nameless workspace with "A
+    // workspace needs a name", which then sat in the transcript for good
+    // because nothing re-asked. So the open is remembered and run once there is
+    // a workspace to run it for. Left loading rather than erroring: the
+    // transcript is on its way, only not yet.
+    if (!configured || pluginDir === "") { messagesQueued = true; return }
+    messagesQueued = false
     if (messageProc.running) messageProc.running = false
     var command = ["python3", helper(), "messages", "--account", alias,
                    "--channel", String(row.id), "--top", "40"]
@@ -477,9 +520,38 @@ Item {
       kind: "conversation", key: "c:" + String(id), id: String(id),
       title: String(title || ""), channelKind: String(kind || "channel"),
       subtitle: "", topic: "", when: "", ts: "", unread: false, unreadCount: 0,
-      presence: "", avatar: "", current: false
+      presence: "", avatar: "", current: false,
+      // A stand-in until the real row lands - see adoptRealRow. Nothing
+      // downstream reads it; it only says that this row is the best that could
+      // be built at the time and not what Slack actually says.
+      provisional: true
     }, anchor)
   }
+
+  // A conversation opened before the sidebar existed - a clicked toast, or a
+  // row in the bar's dropdown - was given the stand-in row above, because the
+  // real one was still a poll away. It carries the id and whatever the payload
+  // named, and little else: no unread mark, so opening it would not have
+  // counted as reading it, and no topic or face for the header. The moment the
+  // real row lands it takes over.
+  function adoptRealRow() {
+    if (!openConversation || openConversation.provisional !== true) return
+    var real = rowFor(openConversation.id)
+    if (!real) return
+    // Marked as adopted before it is assigned, or the next poll would find a
+    // provisional row again and read the same conversation a second time.
+    real.provisional = false
+    openConversation = real
+    // Opening it was reading it, and this is the first moment that could be
+    // known. The transcript may already be on screen, in which case the mark
+    // is made now rather than waiting for a reload nothing would ask for.
+    if (real.unread === true) {
+      if (threadTs === "" && messages.length > 0) markRead(newestKnownTs())
+      else markOnLoad = true
+    }
+  }
+
+  onViewChanged: adoptRealRow()
 
   property bool markOnLoad: false
 
@@ -490,6 +562,9 @@ Item {
     anchorTs = ""
     messages = []
     messagesError = ""
+    // Nothing is waiting on a workspace any more; there is no conversation to
+    // run it for.
+    messagesQueued = false
     draft = ""
     canvasFileId = ""
     canvasOpen = false

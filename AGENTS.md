@@ -22,7 +22,12 @@ src/Model.js           Pure JS: shaping, grouping, labels, link building. No Qt
                        types, so `node dev/test-model.js` can run it.
 src/Service.qml        Owns the Processes that run slack.py, the poll timer,
                        and the state the UI binds to.
-src/BarWidget.qml      The bar icon. Opens the window; there is no dropdown.
+src/BarWidget.qml      The bar icon, and the Loader that mounts the dropdown.
+                       Left-click toggles the dropdown, right-click summons the
+                       window, middle-click refreshes.
+src/BarPanel.qml       The dropdown: what is waiting, and nothing else. Binds to
+                       the bar's Service with `unreadOnly` on it, so opening it
+                       fetches nothing. Every row is a way into the window.
 src/SlackWindow.qml    The window. Sidebar, transcript, message box, and the
                        canvas pane - which has no message box, and has the
                        Markdown editor instead. ~2k lines.
@@ -182,6 +187,22 @@ fatal QML error makes it exit instead.
 
 ## Things that will surprise you
 
+- **A summon applies its payload before the settings exist, and the settings
+  arriving looks like a workspace switch.** `open()` starts `config.py` and
+  applies the payload without waiting for it, so a deep link - a clicked toast,
+  a row in the bar's dropdown - reaches `openById` while `alias` is still `""`.
+  Two separate things then ate it: `fetchMessages` asked the helper for a
+  transcript against a nameless workspace (`bad_alias`, "A workspace needs a
+  name") and nothing re-asked, and `onAliasChanged` treated `"" -> "work"` as a
+  change of workspace and called `closeConversation()`. The second is the one
+  that wastes an afternoon, because what the window shows is "Pick a
+  conversation" - a link that looks like it was never followed, with no error
+  anywhere. `messagesQueued` covers the first, `lastAlias` the second. **Test
+  this cold**: the whole class is invisible once the window is up, and the dev
+  harness hides it twice over, because it assigns settings a second time (the
+  real bar entry, then the fixtures) and that *is* a genuine workspace switch.
+  A variant that neuters `fixtures()` and opens a real conversation from
+  `Component.onCompleted` is what actually reproduces it.
 - **The offscreen harness runs the software scene graph, so a shader path is
   invisible to every screenshot in this repo.** `QT_QPA_PLATFORM=offscreen`
   forces it whatever `QSG_RHI_BACKEND` says, and `GraphicsInfo.api ===

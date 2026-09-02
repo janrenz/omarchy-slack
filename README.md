@@ -5,6 +5,12 @@ of their own.
 
 - **A bar icon** that tints when something is waiting, with a tooltip naming the
   workspace and the count. Optionally the number beside it.
+- **A dropdown behind it**, and deliberately only one thing: what is waiting.
+  That is the question a bar is asked — *does anything need me* — and it is
+  answered by picking from a short list, which is what a popup that closes on
+  click-away can do. Reading a conversation and writing a reply is not, so a row
+  here opens the window at that conversation rather than being a smaller copy of
+  it. Right-click the icon to skip the dropdown and go straight to the window.
 - **A window** — a real Hyprland toplevel, tiled like anything else — with the
   conversations on the left, the transcript on the right, and a box to answer
   in.
@@ -298,6 +304,10 @@ window is a focus ladder rather than a bag of shortcuts: **list → conversation
 one rung at a time, and `j`/`k` always mean "down and up in whatever has
 focus".
 
+The dropdown behind the bar icon has its own handful, because it holds its own
+one thing: `o` opens the window, `r` refreshes, `j`/`k` and `Enter` walk what is
+waiting, and `Escape` closes it.
+
 ### Moving
 
 | Key | What it does |
@@ -386,6 +396,7 @@ is the line that writes it into the registry — so the plugin brings its own.
 | `refreshIntervalSec` | `120` | How often to poll (30–3600). |
 | `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
 | `icon` / `label` | `󰓭` | Bar glyph, or text instead of it. |
+| `ipcTarget` | — | A name of your own for the dropdown, so a key can summon it: set `slack` and bind `omarchy-shell slack toggle`. Empty means the dropdown opens by clicking the icon. The window is separate and always answers to `omarchy-shell shell toggle janrenz.omarchy.slack`. |
 | `tintOnUnread` | `true` | Highlight the bar icon while something is unread. |
 | `showCount` | `false` | The number of waiting conversations, beside the icon. |
 | `notify` | `true` | Desktop notification when a conversation has something new in it. |
@@ -695,6 +706,60 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.7.0 — 2026-09-02
+
+- **A dropdown behind the bar icon, holding what is waiting.** Clicking the icon
+  opened the whole window, which is a lot of screen for the question actually
+  being asked — *does anything need me* — and answering it meant tiling a
+  toplevel, reading two lines and closing it again. The icon now opens a small
+  popup with the unread conversations in it and nothing else: `Enter` or a click
+  on a row opens the window at that conversation, `o` opens the window on
+  whatever it was showing, `r` refreshes, `Escape` closes it. Right-click the
+  icon to skip the popup entirely, which is the route for somebody who already
+  knows they are about to write a reply.
+- **Nothing new is fetched for it.** The dropdown binds to the Service the bar
+  icon already owns, with `unreadOnly` set on it, so opening the popup costs
+  Slack no request at all and draws the same rows — unread marks, counts,
+  previews — that the poll had already paid for. Faces are still not asked for
+  behind the bar, so the rows are text, tighter than the window's.
+- **A deep link works when the window has to be mounted for it.** Opening a
+  conversation from the dropdown — or from a clicked notification, which took
+  the same route — worked only when the window was already up with its
+  conversations loaded. Cold, it landed on "Pick a conversation", as though the
+  link had never been followed. Two things were in the way, and both are about a
+  summon applying its payload while the workspace name is still a subprocess
+  away: the transcript was asked for against a nameless workspace, which the
+  helper rightly refuses and nothing re-asked; and the name then *arriving* was
+  taken for a change of workspace, which closes what is open — correct when you
+  switch workspaces, wrong when there was no workspace a moment ago. The open is
+  now remembered and run once there is a workspace to run it for, and only a
+  real change of workspace closes anything. The row's name and kind travel in
+  the payload too, so the header says where you are before the first poll
+  answers.
+- **A reaction with a skin tone on it draws the emoji again.** A reaction
+  carries its tone welded on with a double colon — `ok_hand::skin-tone-2` —
+  rather than as the separate shortcode a message body uses, and the whole
+  string was looked up in the table. It missed, every time, so every toned hand
+  in a workspace fell back to drawing the text `:ok_hand:` — the fallback meant
+  for a picture that *cannot* be drawn, on an emoji that could. The modifier now
+  comes off before the lookup, the same way it already came out of a sentence.
+  `:hearts:` is there too: the card suit, which is not the `:heart:` above it.
+- **A kept transcript knows what rendered it.** The cache holds the rows the
+  window draws rather than Slack's own answer, so fixing the emoji table fixed
+  nothing for a conversation already on disk — and `seen`, which decides
+  whether a record is current, cannot notice: a quiet conversation's witness
+  never moves, so it would have gone on drawing `:ok_hand:` for good. Records
+  now carry the version that built them and a mismatch is re-read.
+- **`ipcTarget`**, so a key can summon the dropdown. `omarchy-shell shell
+  toggle` on the plugin id is routed to the window by the shell and can never
+  reach the dropdown, so the dropdown needs a name of its own. Empty by default,
+  which means no handler and nothing to collide with.
+- **The icon summons the window rather than toggling it.** The shell's toggle
+  knows only "open", and a window on another workspace is open — so a click
+  meant to reach it hid it instead, and the second click brought it back to the
+  workspace you were on all along. Only the route changed; the window still
+  closes itself, and a keybinding still gets the toggle.
 
 ### 0.6.2 — 2026-09-02
 

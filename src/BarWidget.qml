@@ -4,9 +4,13 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The bar icon. There is no dropdown behind it: a conversation is a thing you
-// read and answer, which wants a window, so the icon opens the window rather
-// than a popup that would close on click-away half way through a reply.
+// The bar icon, and the small dropdown behind it.
+//
+// The dropdown answers the question a bar is asked - whether anything needs
+// you - and hands everything else to the window: a conversation is a thing you
+// read and answer, which wants somewhere that does not close on click-away
+// half way through a reply. See BarPanel.qml for what that division buys and
+// where it is drawn.
 BarWidget {
   id: root
   moduleName: "janrenz.omarchy.slack"
@@ -26,8 +30,57 @@ BarWidget {
     return value === undefined || value === null ? fallback : value
   }
 
+  // The window, which the shell owns because the manifest declares the "panel"
+  // kind. Nothing about the dropdown changes this route: a plugin that is both
+  // a bar widget and a panel is routed to its panel by the shell, so
+  // `omarchy-shell shell toggle janrenz.omarchy.slack` still means the window.
+  //
+  // Summon rather than toggle, which is what the icon means by opening the
+  // window: the shell's toggle knows only "open", and a window on another
+  // workspace is open - so a click meant to reach it hid it instead, and the
+  // second click brought it back to the workspace you were on all along. The
+  // window itself is still what closes it, and the toggle above is still what
+  // a keybinding gets.
   function openWindow() {
-    Quickshell.execDetached(["omarchy-shell", "shell", "toggle", "janrenz.omarchy.slack"])
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon",
+                             "janrenz.omarchy.slack", "{}"])
+  }
+
+  // Everything the panel needs that it cannot reach from inside a Loader. The
+  // bar hands these to a panel it mounts itself; one nested in a widget has to
+  // be given them.
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("settings" in target) target.settings = root.settings
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+    if ("service" in target) target.service = service
+  }
+
+  function togglePanel() {
+    if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+  }
+
+  // The shape the bar uses to route summon/hide/toggle and to draw the
+  // open-panel mark. It has to live on the widget in the bar slot, not on the
+  // panel nested inside it.
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  function open() {
+    if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey()
+  }
+
+  function close() {
+    if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
+  }
+
+  readonly property bool popoutSwitchClosing: panelLoader.item
+    ? panelLoader.item.popoutSwitchClosing === true : false
+
+  function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
   // Whether this is the copy of the widget that speaks.
@@ -57,6 +110,9 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
+
   Service {
     id: service
     settings: root.settings
@@ -66,8 +122,25 @@ BarWidget {
     // from behind one icon rather than one per monitor. See primaryInstance.
     notifies: root.primaryInstance
     // Faces and presence are a request each and are only ever looked at in the
-    // window. The bar draws a count.
+    // window. The bar draws a count, and the dropdown draws names.
     wantsDecoration: false
+    // The dropdown shows what is waiting and nothing else, so the filtering is
+    // done once here rather than by a second copy of conversationRows in the
+    // panel. Fixed rather than a toggle: the whole list is what the window is
+    // for. `unreadCount` comes off the snapshot rather than off these rows, so
+    // the icon still counts the same things it always did.
+    unreadOnly: true
+  }
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("BarPanel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
   }
 
   BarIconButton {
@@ -105,7 +178,11 @@ BarWidget {
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) service.refresh()
-      else root.openWindow()
+      // Right button goes straight to the window, which is where somebody who
+      // knows they are about to write a reply wants to be - and is the route
+      // that survives the dropdown being no use to them.
+      else if (b === Qt.RightButton) root.openWindow()
+      else root.togglePanel()
     }
   }
 }

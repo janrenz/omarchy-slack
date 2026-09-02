@@ -204,6 +204,19 @@ class Emoji(unittest.TestCase):
     def test_a_skin_tone_modifier_comes_off_its_hand(self):
         self.assertEqual(emoji.expand(":wave::skin-tone-4:"), "\U0001F44B")
 
+    def test_a_reaction_welds_its_skin_tone_on_with_a_double_colon(self):
+        # Not the form a message body uses, and the whole string missed the
+        # table: every toned hand drew as the text `:ok_hand:`.
+        self.assertEqual(emoji.char_for("ok_hand::skin-tone-2"), "\U0001F44C")
+        self.assertEqual(emoji.char_for("wave::skin-tone-6"), "\U0001F44B")
+
+    def test_a_suit_is_not_the_feeling(self):
+        self.assertEqual(emoji.char_for("hearts"), "♥️")
+        self.assertEqual(emoji.char_for("heart"), "❤️")
+
+    def test_an_unknown_name_is_still_unknown_with_a_modifier_on_it(self):
+        self.assertEqual(emoji.char_for("blob-wave::skin-tone-3"), "")
+
     def test_the_picker_offers_characters_it_has(self):
         rows = emoji.picker_rows()
         self.assertTrue(all(row["emoji"] and row["name"] for row in rows))
@@ -295,6 +308,15 @@ class Reactions(unittest.TestCase):
         rows = slack.reaction_rows({"reactions": [
             {"name": "shipit-squirrel", "count": 1, "users": []}]}, "U1")
         self.assertEqual(rows[0]["emoji"], ":shipit-squirrel:")
+
+    def test_a_toned_hand_draws_the_hand(self):
+        # The chip used to read `:ok_hand:` in text, which is the fallback for
+        # a picture that cannot be drawn - and this one can.
+        rows = slack.reaction_rows({"reactions": [
+            {"name": "ok_hand::skin-tone-2", "count": 2, "users": ["U1"]}]}, "U1")
+        self.assertEqual(rows[0]["emoji"], "\U0001F44C")
+        # The name Slack gave it is what goes back on a click, modifier and all.
+        self.assertEqual(rows[0]["name"], "ok_hand::skin-tone-2")
 
     def test_who_reacted_is_named_for_the_line_a_chip_shows(self):
         users = {"U1": {"name": "Jan Renz"}, "U2": {"name": "Ana Beltr\u00e1n"}}
@@ -1493,6 +1515,33 @@ class Transcripts(unittest.TestCase):
         self.assertTrue(second["cached"])
         self.assertEqual(second["messages"][0]["text"], "hello")
         self.assertEqual(len(self.asked), spent, "nothing was asked the second time")
+
+    def test_a_transcript_rendered_by_older_code_is_read_again(self):
+        # The rows on disk are what the window draws, not Slack's answer, so a
+        # change to how one is built - the emoji table - has to retire them. A
+        # quiet conversation's `seen` never moves, so nothing else would.
+        self._seen("100.0")
+        self._run(self._args())
+        path = slack.transcript_cache_path("work", "C1", "")
+        record = slack.read_json(path, None)
+        record["render"] = slack.RENDER_VERSION - 1
+        slack.write_json(path, record)
+
+        self.asked = []
+        again = self._run(self._args())
+        self.assertFalse(again.get("cached"))
+        self.assertIn("conversations.history", self.asked)
+
+    def test_a_transcript_from_before_there_was_a_version_is_read_again(self):
+        self._seen("100.0")
+        self._run(self._args())
+        path = slack.transcript_cache_path("work", "C1", "")
+        record = slack.read_json(path, None)
+        del record["render"]
+        slack.write_json(path, record)
+
+        self.asked = []
+        self.assertFalse(self._run(self._args()).get("cached"))
 
     def test_a_kept_transcript_carries_the_canvas_id_so_that_is_not_asked_twice(self):
         self._run(self._args())
