@@ -129,6 +129,7 @@ uses, is an app you install into your own workspace and a token it shows you.
          - files:read
          - files:write
          - search:read
+         - stars:read
    settings:
      org_deploy_enabled: false
      socket_mode_enabled: false
@@ -193,10 +194,12 @@ scope would enable the rest, rather than showing a button that fails.
 | `files:read` | pictures in the transcript | files are chips only |
 | `files:write` | sending a file | no **Attach** button, and a file dropped on the window is turned away with a line saying this scope is why |
 | `search:read` | searching every message — **and every preview and unread mark in the sidebar**, see below | the sidebar is names only |
+| `stars:read` | which conversations you starred in Slack, so your favourites lead each section of the sidebar | the sidebar orders by recency or name alone |
 
 Adding a scope later means editing the app, reinstalling it, and pasting the
 new token. The plugin notices the moment it has it. That includes `files:write`,
-which an app installed before this plugin could send files will not have.
+which an app installed before this plugin could send files will not have, and
+`stars:read`, which one installed before it respected your favourites will not.
 
 ## Sending a file
 
@@ -267,6 +270,7 @@ focus".
 | `u` | Show only what is unread |
 | `m` | Mark this conversation read |
 | `r` | Reload this conversation |
+| `c` | Read this channel's canvas, and go back again |
 | `,` | Settings |
 | `?` | This list |
 
@@ -495,7 +499,12 @@ have already read comes back.
   one window.
 - **Muted channels are not muted.** Slack keeps mutes in a preference the Web
   API does not publish, so a muted channel is an ordinary channel here.
-- **No huddles, calls, canvases, workflows, or editing what you sent.**
+- **A canvas can be read, not written.** The document a channel keeps is
+  fetched, converted to text and shown in the transcript's own space by the
+  **Canvas** button in the header (or `c`), where it can be selected and its
+  links followed. Editing one, and canvases attached to a *message* rather than
+  to the channel, are still Slack's job.
+- **No huddles, calls, workflows, or editing what you sent.**
 - **A workspace's own emoji stay as their names.** `:blob-wave:` is a picture
   that lives in that workspace and there is no character for it, so the name is
   what a reader gets — which is what a terminal client would show and is at
@@ -558,6 +567,46 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.3.0 — 2026-09-02
+
+- **Your favourites lead the sidebar.** A channel you starred in Slack was
+  buried wherever recency put it, which meant the one you look at every morning
+  sat below whatever a bot said last. Starred conversations now come first in
+  each section, in both orders, with a small ★ on the row so the order has
+  something to explain it — and a starred DM is drawn even when it has been
+  quiet, since being quiet is usually why somebody starred it. This needs one
+  new scope, `stars:read`: an app installed before today does not have it, and
+  without it the sidebar keeps exactly the order it had. Slack has marked
+  `stars.list` deprecated and there is nowhere else to ask, so a refusal is
+  swallowed and said in the warnings rather than reshuffling the sidebar.
+- **A channel's canvas can be read here.** The charter, the runbook, the list
+  of who is on call — the document pinned to the top of a channel was one thing
+  you had to leave for Slack to read. The header now has a **Canvas** button on
+  a channel that keeps one, and `c` does the same: it takes the transcript's
+  space, so the message box stays where it is and the answer to what the canvas
+  says can be typed while it is still on screen. It needs no new scope, because
+  a canvas is a file. What arrives is HTML and what is drawn is text: headings,
+  lists and tables become lines, mentions become names, and the links keep
+  their addresses as offsets into that text — the same treatment a message
+  gets, so nothing inside a canvas can choose its own markup.
+- **Answering in a thread can be done with the mouse.** The chip under a
+  message opened a thread that already had replies, and `t` opened one on the
+  message under the cursor — but *starting* a thread by pointing at a message
+  nobody had answered yet could not be done at all. Which is most of them: a
+  thread is what you start when the answer would derail the channel. There is
+  now an ↩ beside the ✛ on the message under the pointer, and pressing it opens
+  the thread with the cursor already in the box.
+- **Fixed: a picture in the transcript was an empty box.** A screenshot in a
+  channel drew nothing — a clickable, empty frame, with the picture itself
+  still one click away in the viewer. Version 0.2.0 had put the thumbnail
+  inside a `ClippingRectangle` so its corners would follow the frame's radius
+  instead of being square inside it; that clip is a shader pass, and on this
+  machine it drew no picture at all. The plain image is back. Square corners on
+  a photograph is worth fixing one day, and not with a render path that cannot
+  be tested: this plugin's harness draws offscreen on the software scene graph,
+  which stands aside for the plain image — so the one configuration that was
+  broken was the one configuration no screenshot here could ever show.
 
 ### 0.2.0 — 2026-09-01
 

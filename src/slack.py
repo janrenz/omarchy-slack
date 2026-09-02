@@ -21,6 +21,7 @@ See README.md.
 import argparse
 import base64
 import hashlib
+import html as html_entities
 import json
 import os
 import re
@@ -86,6 +87,15 @@ LIST_TTL = 15 * 60
 # and the window from being two pollers: whichever one is not the timekeeper
 # reads what the other just wrote.
 SNAPSHOT_MAX_AGE = 15 * 60
+# Starring a conversation is a thing somebody does about twice a year, so
+# asking every poll would spend a request on an answer that never moves.
+STARS_TTL = 10 * 60
+STARS_CAP = 400
+# A canvas is a document, and a reading pane is not a word processor. Enough
+# for the ones a channel actually keeps - a charter, a runbook, a list of who
+# is on call - and a line at the end saying to open Slack for the rest.
+CANVAS_CAP = 200 * 1024
+CANVAS_TEXT_CAP = 40000
 
 # What a token has to carry for each thing the window offers. Read from the
 # API rather than from what was requested: an app can be installed with fewer
@@ -104,6 +114,13 @@ CAPABILITIES = {
     "files": ("files:read",),
     "upload": ("files:write",),
     "people": ("users:read",),
+    # Which conversations you starred in Slack. A separate scope from the ones
+    # that read them, and one an app installed before this feature existed will
+    # not have - so the sidebar falls back to the order it always had rather
+    # than pretending nothing is starred.
+    "stars": ("stars:read",),
+    # A channel's canvas is a file, and reading one is reading a file.
+    "canvas": ("files:read",),
 }
 
 # Everything a full install asks for, in the order the README lists them. Kept
@@ -116,6 +133,7 @@ WANTED_SCOPES = [
     "mpim:history", "mpim:read", "mpim:write",
     "chat:write", "reactions:read", "reactions:write",
     "users:read", "files:read", "files:write", "search:read", "emoji:read",
+    "stars:read",
 ]
 
 
@@ -1227,6 +1245,10 @@ def conversation_row(conversation, users, me_handle=""):
         # request nobody has spent yet, and says so rather than claiming to
         # have nothing new in it.
         "current": False,
+        # Starred in Slack - what its own sidebar calls a favourite. Filled in
+        # by fetch_account, since it is one answer for the whole workspace
+        # rather than something on each conversation.
+        "starred": False,
     }
 
 
@@ -1250,10 +1272,16 @@ def by_interest(rows, seen):
 def sort_rows(rows, prefer_recent):
     """The order the sidebar draws them in, within each section.
 
-    By what was actually read from the conversation, and only then by Slack's
-    own `updated` - a row with no preview has to sort somewhere, and putting
-    every one of them in a block at the bottom in alphabetical order is what
-    made the channels look like an appendix.
+    Starred first, whichever order is chosen. Slack gives a favourite a section
+    of its own at the top of its sidebar, and a plugin that quietly buried the
+    channel you look at every morning under whatever spoke last was disagreeing
+    with the user about their own workspace. Two sections here, not four, so it
+    is a block at the top of each rather than a heading of its own.
+
+    Then by what was actually read from the conversation, and only then by
+    Slack's own `updated` - a row with no preview has to sort somewhere, and
+    putting every one of them in a block at the bottom in alphabetical order is
+    what made the channels look like an appendix.
     """
     def when(row):
         try:
@@ -1261,10 +1289,14 @@ def sort_rows(rows, prefer_recent):
         except (TypeError, ValueError):
             return 0.0
 
+    def favourite(row):
+        return 0 if row.get("starred") else 1
+
     if prefer_recent:
-        return sorted(rows, key=lambda row: (-when(row), -int(row.get("updated") or 0),
+        return sorted(rows, key=lambda row: (favourite(row), -when(row),
+                                             -int(row.get("updated") or 0),
                                              row["title"].lower()))
-    return sorted(rows, key=lambda row: row["title"].lower())
+    return sorted(rows, key=lambda row: (favourite(row), row["title"].lower()))
 
 
 def channel_names(alias, rows):
@@ -1394,6 +1426,50 @@ def conversation_lists(api, alias, fresh=False):
     return rows, problem
 
 
+def starred_ids(api, alias, account, fresh=False):
+    """The conversations starred in Slack, as a set of ids.
+
+    `stars.list` is the only place to ask. Slack has marked it deprecated - the
+    star on a *message* became "Later" - but the star on a conversation is what
+    its sidebar still calls a favourite, and this is where that is answered. If
+    it ever stops answering, the refusal is swallowed and the sidebar goes back
+    to the order it had, which is the right failure for a preference about
+    ordering.
+
+    Cached, because starring something happens about twice a year and this
+    would otherwise be a request on every poll.
+    """
+    if not granted(account, "stars"):
+        return set(), ""
+    cached = read_json(cache_path(alias, "stars.json"), None) or {}
+    age = time.time() - float(cached.get("at") or 0)
+    if not fresh and cached.get("ids") is not None and age < STARS_TTL:
+        return set(cached["ids"]), ""
+
+    items, problem = api.paged("stars.list", {}, "items", STARS_CAP)
+    if problem:
+        # Whatever was believed last time beats claiming nothing is starred: on
+        # one refused poll the sidebar would reshuffle and on the next shuffle
+        # back, which reads as the plugin losing its place rather than as a
+        # request that failed.
+        return set(cached.get("ids") or []), problem
+
+    found = []
+    for item in items:
+        # A star on a message carries the channel it is in, and starring a
+        # message is not starring the conversation - so only the item types
+        # that are themselves a conversation count.
+        if str(item.get("type") or "") not in ("channel", "im", "group"):
+            continue
+        target = item.get("channel") or item.get("group") or item.get("im")
+        if isinstance(target, dict):
+            target = target.get("id")
+        if target:
+            found.append(str(target))
+    write_json(cache_path(alias, "stars.json"), {"ids": found, "at": time.time()})
+    return set(found), ""
+
+
 def fetch_account(alias, args):
     account = load_account(alias)
     # A token stored before this check existed, or one whose app was changed
@@ -1434,6 +1510,10 @@ def fetch_account(alias, args):
     rows = [conversation_row(conversation, users, account.get("userName", ""))
             for conversation in listed]
     rows = [row for row in rows if row["id"]]
+    stars, stars_problem = starred_ids(api, alias, account,
+                                       fresh=getattr(args, "fresh", False))
+    for row in rows:
+        row["starred"] = row["id"] in stars
     names = channel_names(alias, rows)
     marks, seen = load_marks(alias)
 
@@ -1571,6 +1651,13 @@ def fetch_account(alias, args):
         warnings.append({"scope": "previews", "message": friendly(problems[0])})
     if api.rate_limited:
         warnings.append({"scope": "rate", "message": friendly("ratelimited")})
+    if stars_problem:
+        # Said out loud rather than swallowed: the sidebar is in a different
+        # order than it was, and "your favourites could not be read" is the
+        # only thing that explains it.
+        warnings.append({"scope": "stars",
+                         "message": "Could not read which conversations you starred: %s"
+                                    % friendly(stars_problem)})
 
     # Every channel is listed: there are usually few enough of them to be a
     # list, and a channel you are in but cannot see is a channel you have lost.
@@ -1582,7 +1669,10 @@ def fetch_account(alias, args):
     # shows the ones with something in them and says how many it did not draw.
     # The quick switcher reaches every one of them by name.
     dm_rows = by_interest([row for row in rows if row["kind"] in ("im", "mpim")], seen)
-    dms = [row for row in dm_rows if row["ts"] or row["unread"]]
+    # A starred DM is drawn whether or not it has said anything lately. Being
+    # quiet is exactly why somebody starred it: it is the one they want to find
+    # without searching for it.
+    dms = [row for row in dm_rows if row["ts"] or row["unread"] or row["starred"]]
     if len(dms) < DM_ROWS:
         # Ones that were never asked about, in interest order, to fill the
         # sidebar out to something worth having: a poll that only covered ten
@@ -1770,6 +1860,343 @@ def transcript(api, alias, account, messages, want_avatars):
     return [message_row(message, users, names, me_id, avatars) for message in messages]
 
 
+# --------------------------------------------------------------------------
+# canvases
+#
+# A channel canvas is the document pinned to the top of a channel - the
+# charter, the runbook, who is on call this week - and until now the only way
+# to read one from here was to leave for Slack. It is a file: Slack keeps it as
+# `filetype: quip`, `conversations.info` names its id, and the content comes
+# back from files.slack.com as a fragment of HTML with the token attached. No
+# new scope is needed for any of that; reading a canvas is reading a file.
+#
+# What arrives is markup, and markup is not what the window draws. It is turned
+# into prose and a list of where the links in it are - the same pair a message
+# is turned into, for the same reason (invariant 3): the window builds its own
+# anchors out of text it escaped itself, so nothing inside a canvas can arrive
+# already being markup.
+# --------------------------------------------------------------------------
+
+_CANVAS_COMMENT = re.compile(r"(?s)<!--.*?-->")
+_CANVAS_STRIP = re.compile(r"(?is)<(script|style|head|title)\b[^>]*>.*?</\1\s*>")
+_CANVAS_TOKEN = re.compile(r"(?s)<[^>]*>|[^<]+")
+_CANVAS_HREF = re.compile(r"""(?is)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
+_CANVAS_SPACE = re.compile(r"[ \t\r\n]+")
+# Tags that end a paragraph, and tags that only end a line. Both, because a
+# canvas puts a `<br/>` at the end of every list item and then closes the item
+# as well: treating the two the same left a blank line inside every list.
+_CANVAS_PARAGRAPHS = frozenset((
+    "p", "div", "ul", "ol", "table", "blockquote", "section", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+))
+_CANVAS_LINES = frozenset(("br", "tr", "li"))
+# The ones that hold other things. Their close is the end of a block even
+# though the thing inside already ended the line.
+_CANVAS_CONTAINERS = frozenset(("ul", "ol", "table", "blockquote", "section"))
+_CANVAS_BREAKS = _CANVAS_PARAGRAPHS | _CANVAS_LINES
+_CANVAS_CELLS = frozenset(("td", "th"))
+
+
+def _canvas_tag(piece):
+    """(name, is_closing) for one `<...>`, lowercased. ("", False) for nonsense."""
+    body = piece[1:-1] if piece.endswith(">") else piece[1:]
+    closing = body.startswith("/")
+    body = body.lstrip("/").strip()
+    if not body:
+        return "", closing
+    return re.split(r"[\s/>]", body, maxsplit=1)[0].lower(), closing
+
+
+_CANVAS_MENTION = re.compile(r"@([UWB][A-Z0-9]{2,})")
+
+
+def canvas_text(markup, names=None):
+    """A canvas as prose, and where the links in it are.
+
+    The whitespace is settled as the text is built rather than tidied
+    afterwards, because a link is an offset into this string: a pass that
+    collapsed blank lines at the end would move every anchor after the first
+    one it touched.
+
+    Shortcodes are left alone for the same reason - expanding `:wave:` into a
+    character changes the length of the text under the offsets. A canvas
+    carries the characters themselves anyway; Slack renders them on the way in.
+    """
+    text = _CANVAS_STRIP.sub("", _CANVAS_COMMENT.sub("", str(markup or "")))
+    parts = []
+    links = []
+    length = 0
+    last = ""
+    open_link = None
+    # Whether anything worth a line break has been written since the last one.
+    wrote = False
+
+    def trailing_newlines():
+        count = 0
+        for part in reversed(parts):
+            for char in reversed(part):
+                if char != "\n":
+                    return count
+                count += 1
+        return count
+
+    def emit(chunk):
+        nonlocal length, last
+        if not chunk:
+            return
+        if chunk.strip("\n") == "":
+            # One blank line is a paragraph break; two is a mistake somebody
+            # else's markup made. Clamped here rather than tidied at the end,
+            # because a link is an offset into this string and a later pass
+            # that removed a character would move every anchor after it.
+            chunk = chunk[:max(0, 2 - trailing_newlines())]
+            if not chunk:
+                return
+        parts.append(chunk)
+        length += len(chunk)
+        last = chunk[-1]
+
+    def drop_tab():
+        """Take back the cell separator at the end of a row.
+
+        Safe to do after the fact: a link is recorded when its `</a>` is
+        reached, so no link can already end past this tab, and everything
+        recorded afterwards is measured against the shortened length.
+        """
+        nonlocal length, last
+        while parts and parts[-1] == "\t":
+            parts.pop()
+            length -= 1
+        last = parts[-1][-1] if parts else ""
+
+    for match in _CANVAS_TOKEN.finditer(text):
+        piece = match.group(0)
+        if not piece.startswith("<"):
+            words = _CANVAS_SPACE.sub(" ", html_entities.unescape(piece))
+            # A canvas writes a mention as the bare user id, which is nobody's
+            # name. Substituted here, while the text is being built, so the
+            # offsets a link is measured in are offsets into what the reader
+            # will actually see. An id nobody has a name for stays as it is.
+            if names:
+                words = _CANVAS_MENTION.sub(
+                    lambda match: "@" + str((names.get(match.group(1)) or {}).get("name")
+                                            or match.group(1)),
+                    words)
+            # A space against the start, or against a line break, is the
+            # markup's own indentation rather than anything anybody typed.
+            if words == " " and last in ("", "\n", "\t", " "):
+                continue
+            if words.startswith(" ") and last in ("", "\n"):
+                words = words[1:]
+            if words.strip():
+                wrote = True
+            emit(words)
+            continue
+
+        name, closing = _canvas_tag(piece)
+        if name == "a":
+            if closing:
+                if open_link and open_link[0] and length > open_link[1]:
+                    links.append({"href": open_link[0], "start": open_link[1], "end": length})
+                open_link = None
+            else:
+                found = _CANVAS_HREF.search(piece)
+                href = safe_link(found.group(1) or found.group(2) or found.group(3)) if found else ""
+                open_link = (href, length)
+        elif name == "li" and not closing:
+            if wrote:
+                emit("\n")
+                wrote = False
+            emit("• ")
+        elif name in _CANVAS_CELLS and closing:
+            # A cell boundary, not a line: a canvas table is usually two
+            # columns of short things, and one row per line reads as a row.
+            if wrote and last != "\t":
+                emit("\t")
+        elif name in _CANVAS_BREAKS and (closing or name in ("br", "hr")):
+            # On the closing tag, because a row that broke the line on both
+            # `<tr>` and `</tr>` left a blank line between every two rows of a
+            # table. `br` and `hr` close nothing and are the break themselves.
+            #
+            # And only where something has been written since the last break.
+            # That one condition is what handles an empty `<p></p>`, the
+            # `<br/>` a canvas puts before every `</li>`, and the three
+            # elements that close where a reader sees one paragraph end - all
+            # of which used to arrive as blank lines.
+            if not wrote:
+                # A container closing over a line that already ended still
+                # earns the blank line: the last item of a list ends the line,
+                # and without this the paragraph after it starts on the next
+                # one as though it were another item.
+                if (closing and name in _CANVAS_CONTAINERS and last == "\n"
+                        and not (len(parts) >= 2 and parts[-2].endswith("\n"))):
+                    emit("\n")
+                continue
+            if last == "\t":
+                drop_tab()
+            emit("\n\n" if name in _CANVAS_PARAGRAPHS else "\n")
+            wrote = False
+
+    body = "".join(parts).rstrip()
+    truncated = len(body) > CANVAS_TEXT_CAP
+    if truncated:
+        body = body[:CANVAS_TEXT_CAP].rstrip()
+    links = [link for link in links if link["end"] <= len(body)]
+    return body, links, truncated
+
+
+def drop_repeated_title(body, links, title):
+    """The canvas without its own title as the first line of it.
+
+    Slack takes a canvas's title from its first heading, so a canvas that has
+    one arrives with the same words twice - once as the title the pane draws
+    and once at the top of the text under it. Cut here rather than while the
+    text is being built, because the title is not known there; the links move
+    with it by exactly what was removed, which is the one adjustment that can
+    be made to finished offsets without guessing.
+    """
+    name = str(title or "").strip()
+    if not name or not body.startswith(name):
+        return body, links
+    rest = body[len(name):]
+    if rest[:1] not in ("", "\n"):
+        return body, links
+    cut = len(body) - len(rest.lstrip("\n"))
+    moved = []
+    for link in links:
+        if link["start"] < cut:
+            continue
+        moved.append({"href": link["href"], "start": link["start"] - cut,
+                      "end": link["end"] - cut})
+    return body[cut:], moved
+
+
+def canvas_ids(info):
+    """Every canvas id a `conversations.info` answer names, best first.
+
+    Two shapes, because Slack changed its mind: a channel that has had one
+    since before tabs carries `properties.canvas`, and one set up since carries
+    it as a tab. A channel can have both - the old one migrated and a new one
+    beside it - and the tab is the one its own client shows.
+    """
+    properties = ((info or {}).get("channel") or {}).get("properties") or {}
+    found = []
+    for tab in properties.get("tabs") or []:
+        if str((tab or {}).get("type") or "") != "canvas":
+            continue
+        file_id = str(((tab or {}).get("data") or {}).get("file_id") or "")
+        if file_id:
+            found.append(file_id)
+    canvas = properties.get("canvas") or {}
+    file_id = str(canvas.get("file_id") or "")
+    # An empty channel canvas is one nobody has written in. Offering to open it
+    # would be offering a blank page.
+    if file_id and not canvas.get("is_empty") and file_id not in found:
+        found.append(file_id)
+    return found
+
+
+def canvas_of(api, channel):
+    """The id of the canvas this conversation keeps, or "".
+
+    Quiet about failure on purpose: this rides along with opening a
+    conversation, and a transcript that refused to draw because Slack would not
+    say whether there was a canvas would be a poor trade.
+    """
+    ok, info = api.call("conversations.info", {"channel": channel})
+    if not ok:
+        return ""
+    found = canvas_ids(info)
+    return found[0] if found else ""
+
+
+def fetch_canvas(url, token, timeout=30):
+    """One canvas's markup, straight from Slack's file host.
+
+    The host is checked before the token goes anywhere near the request, the
+    same way `fetch_media` does it and for the same reason: a URL is not
+    somewhere this plugin will go just because something handed it over.
+    """
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    if parsed.scheme != "https" or parsed.hostname not in TOKEN_HOSTS:
+        raise AccountError("bad_canvas_host",
+                           "Refusing to fetch a canvas from %s" % (parsed.hostname or "nowhere"))
+    request = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Authorization": "Bearer " + str(token or ""),
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(CANVAS_CAP + 1)
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    except urllib.error.HTTPError as error:
+        raise AccountError("canvas_failed", "Could not read that canvas (HTTP %d)" % error.code)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise AccountError("canvas_failed", "Could not read that canvas: %s" % error)
+    if content_type not in ("text/html", "text/plain", ""):
+        # An expired token is answered with a sign-in page, cheerfully, with a
+        # 200 on it - so the type is checked rather than trusted.
+        raise AccountError("not_a_canvas",
+                           "That link is %s, not a canvas" % content_type)
+    return body[:CANVAS_CAP].decode("utf-8", "replace")
+
+
+def cmd_canvas(args):
+    """The canvas attached to a channel, as something the window can draw."""
+    if args.demo:
+        out(demo_canvas(args.channel))
+
+    account = load_account(args.account)
+    api = Slack(account["token"])
+
+    file_id = str(args.file or "")
+    if not file_id:
+        ok, info = api.call("conversations.info", {"channel": args.channel})
+        account = remember_scopes(args.account, account, api)
+        if not ok:
+            fail("canvas_failed", friendly(info.get("error", "")))
+        found = canvas_ids(info)
+        if not found:
+            out({"ok": True, "channel": args.channel, "canvas": None})
+        file_id = found[0]
+
+    ok, payload = api.call("files.info", {"file": file_id})
+    account = remember_scopes(args.account, account, api)
+    if not ok:
+        code = payload.get("error", "")
+        if code == "missing_scope":
+            fail("permission_required", scope_error(CAPABILITIES["canvas"]))
+        fail("canvas_failed", friendly(code))
+
+    info = payload.get("file") or {}
+    try:
+        markup = fetch_canvas(info.get("url_private") or "", account.get("token", ""))
+    except AccountError as error:
+        fail(error.code, error.message)
+    title = str(info.get("title") or "").strip() or "Canvas"
+    # Whoever the canvas points at, by name. One request at most, and only for
+    # the ids this machine has not already learned - a canvas naming who is on
+    # call is no use at all as a column of user ids.
+    mentioned = _CANVAS_MENTION.findall(markup)
+    names = resolve_users(api, args.account, mentioned, load_users(args.account)[0]) \
+        if mentioned else {}
+    body, links, truncated = canvas_text(markup, names)
+    body, links = drop_repeated_title(body, links, title)
+    out({
+        "ok": True,
+        "channel": args.channel,
+        "canvas": {
+            "fileId": file_id,
+            "title": title,
+            "permalink": safe_link(info.get("permalink") or ""),
+            "updated": iso_from_ts(info.get("edit_timestamp") or info.get("created") or 0),
+            "text": body,
+            "links": links,
+            "truncated": truncated,
+        },
+    })
+
+
 def cmd_messages(args):
     if args.demo:
         out(demo_messages(args.channel, args.thread))
@@ -1822,6 +2249,13 @@ def cmd_messages(args):
         "anchored": bool(args.around),
         "hasMore": bool(payload.get("has_more")),
         "messages": rows,
+        # Whether this channel keeps a canvas, and which one. Asked here rather
+        # than in the poll: it is one `conversations.info` per conversation and
+        # the sidebar has a hundred of them, while opening one is already a
+        # request. Only the id, so nothing is downloaded until the button is
+        # pressed - a canvas is a document, and most of the time it is not what
+        # was being opened.
+        "canvasFileId": canvas_of(api, args.channel) if not args.thread else "",
     })
 
 
@@ -2664,7 +3098,29 @@ def demo_messages(channel, thread=""):
             "threadUnread": bool(replies) and not thread,
         })
     return {"ok": True, "channel": channel, "thread": thread or "", "anchored": False,
-            "hasMore": False, "messages": messages}
+            "hasMore": False, "messages": messages,
+            # Only the first demo channel keeps one, so the showcase has a
+            # window with the button and a window without it.
+            "canvasFileId": "demo-canvas" if str(channel or "") == DEMO_CANVAS_CHANNEL else ""}
+
+
+DEMO_CANVAS_CHANNEL = "demo-channel-0"
+
+
+def demo_canvas(channel):
+    body, links, truncated = canvas_text(
+        "<h1>On call this week</h1>"
+        "<ul><li>Monday to Wednesday: Ada</li><li>Thursday and Friday: Grace</li></ul>"
+        "<p>The runbook is at "
+        "<a href=\"https://example.com/runbook\">example.com/runbook</a>. "
+        "Page the second on call only after fifteen minutes.</p>"
+        "<table><tr><td>Staging</td><td>deploys on merge</td></tr>"
+        "<tr><td>Production</td><td>deploys at 10:00</td></tr></table>")
+    body, links = drop_repeated_title(body, links, "On call this week")
+    return {"ok": True, "channel": channel, "canvas": {
+        "fileId": "demo-canvas", "title": "On call this week", "permalink": "",
+        "updated": iso_from_ts(time.time() - 3600), "text": body, "links": links,
+        "truncated": truncated}}
 
 
 # --------------------------------------------------------------------------
@@ -2722,6 +3178,15 @@ def main():
     messages.add_argument("--no-avatars", dest="avatars", action="store_false")
     messages.add_argument("--demo", action="store_true")
     messages.set_defaults(func=cmd_messages)
+
+    canvas = with_account("canvas", "the canvas attached to a channel, as text")
+    canvas.add_argument("--channel", required=True, help="conversation id from a fetch")
+    canvas.add_argument("--file", default="",
+                        help="the canvas's file id, when it is already known - "
+                             "`messages` returns it as canvasFileId, and passing it "
+                             "here saves a conversations.info call")
+    canvas.add_argument("--demo", action="store_true")
+    canvas.set_defaults(func=cmd_canvas)
 
     send = with_account("send", "post a message")
     send.add_argument("--channel", required=True)

@@ -1157,5 +1157,183 @@ class Demo(unittest.TestCase):
         self.assertTrue(any("\U0001F64F" in m["text"] for m in payload["messages"]))
 
 
+class CanvasText(unittest.TestCase):
+    """A canvas's HTML as prose, with the links still pointing somewhere.
+
+    The offsets are the whole point: the window escapes this text itself and
+    then puts anchors back at these positions, so a converter that moved the
+    text without moving the links would put an anchor around the wrong words.
+    """
+
+    def convert(self, markup, names=None):
+        return slack.canvas_text(markup, names)
+
+    def spans(self, body, links):
+        return [body[link["start"]:link["end"]] for link in links]
+
+    def test_a_link_still_wraps_its_own_words(self):
+        body, links, _ = self.convert(
+            '<p>See <a href="https://example.com/x">the runbook</a> first.</p>')
+        self.assertEqual(body, "See the runbook first.")
+        self.assertEqual(self.spans(body, links), ["the runbook"])
+
+    def test_a_scheme_nobody_should_follow_keeps_its_words_and_loses_its_address(self):
+        body, links, _ = self.convert('<p><a href="javascript:alert(1)">Click</a></p>')
+        self.assertEqual(body, "Click")
+        self.assertEqual(links, [])
+
+    def test_a_list_is_one_line_per_item_and_no_blank_lines_between(self):
+        """A canvas puts a `<br/>` before every `</li>`, which used to arrive
+        as a blank line inside every list."""
+        body, _, _ = self.convert(
+            "<ul><li>one<br/></li><li>two<br/></li></ul><p>after</p>")
+        self.assertEqual(body, "• one\n• two\n\nafter")
+
+    def test_a_table_row_is_a_line_and_its_cells_are_separated(self):
+        body, _, _ = self.convert(
+            "<table><tr><td>Staging</td><td>on merge</td></tr>"
+            "<tr><td>Live</td><td>at ten</td></tr></table>")
+        self.assertEqual(body, "Staging\ton merge\nLive\tat ten")
+
+    def test_nothing_a_canvas_contains_arrives_as_markup(self):
+        body, links, _ = self.convert("<p>&lt;b&gt;not bold&lt;/b&gt;</p>")
+        self.assertEqual(body, "<b>not bold</b>")
+        self.assertEqual(links, [])
+
+    def test_a_script_is_not_read_as_words(self):
+        body, _, _ = self.convert("<p>before</p><script>alert(1)</script><p>after</p>")
+        self.assertEqual(body, "before\n\nafter")
+
+    def test_a_mention_becomes_a_name_without_moving_the_links(self):
+        body, links, _ = self.convert(
+            '<p>@U0123ABC see <a href="https://example.com/x">this</a></p>',
+            {"U0123ABC": {"name": "Ada Lovelace"}})
+        self.assertEqual(body, "@Ada Lovelace see this")
+        self.assertEqual(self.spans(body, links), ["this"])
+
+    def test_an_unknown_mention_is_left_as_it_arrived(self):
+        body, _, _ = self.convert("<p>@U0123ABC</p>", {})
+        self.assertEqual(body, "@U0123ABC")
+
+    def test_a_long_canvas_is_cut_and_says_so(self):
+        body, _, truncated = self.convert("<p>%s</p>" % ("x" * (slack.CANVAS_TEXT_CAP + 50)))
+        self.assertTrue(truncated)
+        self.assertTrue(len(body) <= slack.CANVAS_TEXT_CAP)
+
+    def test_a_link_past_the_cut_is_dropped_rather_than_left_dangling(self):
+        markup = ("<p>%s</p><p><a href=\"https://example.com/x\">tail</a></p>"
+                  % ("x" * (slack.CANVAS_TEXT_CAP + 50)))
+        body, links, truncated = self.convert(markup)
+        self.assertTrue(truncated)
+        for link in links:
+            self.assertTrue(link["end"] <= len(body))
+
+
+class CanvasDiscovery(unittest.TestCase):
+    """Which canvas a channel keeps, out of the two shapes Slack answers with."""
+
+    def ids(self, properties):
+        return slack.canvas_ids({"channel": {"properties": properties}})
+
+    def test_a_canvas_tab_is_found(self):
+        self.assertEqual(self.ids({"tabs": [
+            {"type": "files", "id": "files"},
+            {"type": "canvas", "id": "Ct1", "data": {"file_id": "F1"}}]}), ["F1"])
+
+    def test_the_older_channel_canvas_is_found(self):
+        self.assertEqual(self.ids({"canvas": {"file_id": "F2", "is_empty": False}}), ["F2"])
+
+    def test_an_empty_channel_canvas_is_not_offered(self):
+        """Offering to open it would be offering a blank page."""
+        self.assertEqual(self.ids({"canvas": {"file_id": "F3", "is_empty": True}}), [])
+
+    def test_a_channel_with_neither_offers_nothing(self):
+        self.assertEqual(self.ids({"tabs": [{"type": "files", "id": "files"}]}), [])
+
+    def test_the_tab_wins_over_the_migrated_one(self):
+        """A channel can carry both - the old one migrated and a new one beside
+        it - and the tab is the one Slack's own client shows."""
+        self.assertEqual(self.ids({
+            "canvas": {"file_id": "old", "is_empty": False},
+            "tabs": [{"type": "canvas", "id": "Ct1", "data": {"file_id": "new"}}],
+        }), ["new", "old"])
+
+
+class CanvasTitle(unittest.TestCase):
+    """Slack takes a canvas's title from its first heading, so it arrives twice."""
+
+    def test_the_repeated_title_goes_and_the_links_move_with_it(self):
+        body, links = slack.drop_repeated_title(
+            "On call\n\nsee here", [{"href": "https://example.com/x", "start": 13, "end": 17}],
+            "On call")
+        self.assertEqual(body, "see here")
+        self.assertEqual(body[links[0]["start"]:links[0]["end"]], "here")
+
+    def test_a_first_line_that_merely_starts_with_the_title_is_kept(self):
+        body, _ = slack.drop_repeated_title("On call this week", [], "On call")
+        self.assertEqual(body, "On call this week")
+
+    def test_a_canvas_whose_body_does_not_repeat_it_is_untouched(self):
+        body, _ = slack.drop_repeated_title("• een\n• twee", [], "een")
+        self.assertEqual(body, "• een\n• twee")
+
+
+class Favourites(unittest.TestCase):
+    """Starred conversations - what Slack's own sidebar calls a favourite."""
+
+    def rows(self, *specs):
+        out = []
+        for title, ts, starred in specs:
+            out.append({"id": title, "title": title, "ts": ts, "updated": 0,
+                        "starred": starred, "unread": False})
+        return out
+
+    def test_a_favourite_leads_whatever_spoke_last(self):
+        ordered = slack.sort_rows(
+            self.rows(("#loud", "200", False), ("#starred", "100", True)), True)
+        self.assertEqual([row["title"] for row in ordered], ["#starred", "#loud"])
+
+    def test_a_favourite_leads_in_alphabetical_order_too(self):
+        ordered = slack.sort_rows(
+            self.rows(("#aaa", "0", False), ("#zzz", "0", True)), False)
+        self.assertEqual([row["title"] for row in ordered], ["#zzz", "#aaa"])
+
+    def test_favourites_are_still_ordered_among_themselves(self):
+        ordered = slack.sort_rows(
+            self.rows(("#old", "100", True), ("#new", "200", True)), True)
+        self.assertEqual([row["title"] for row in ordered], ["#new", "#old"])
+
+    def test_a_token_without_the_scope_is_not_asked(self):
+        """An app installed before this feature existed has no stars:read, and
+        the sidebar keeps the order it always had rather than erroring."""
+        class Explode(slack.Slack):
+            def call(self, *a, **k):
+                raise AssertionError("asked Slack without the scope")
+
+        found, problem = slack.starred_ids(Explode("x"), "demo", {"scopes": "channels:read"})
+        self.assertEqual((found, problem), (set(), ""))
+
+    def test_only_the_items_that_are_conversations_count(self):
+        """Starring a message is not starring the conversation it is in, and a
+        starred message carries the channel it lives in."""
+        captured = {}
+
+        class Fake(slack.Slack):
+            def paged(self, method, params, key, cap):
+                captured["method"] = method
+                return [{"type": "message", "channel": "C_message"},
+                        {"type": "channel", "channel": "C_real"},
+                        {"type": "im", "channel": "D_real"},
+                        {"type": "file", "file": {"id": "F1"}}], ""
+
+        with tempfile.TemporaryDirectory() as cache:
+            slack.CACHE_DIR = cache
+            found, problem = slack.starred_ids(
+                Fake("x"), "demo", {"scopes": "stars:read"}, fresh=True)
+        self.assertEqual(captured["method"], "stars.list")
+        self.assertEqual(found, {"C_real", "D_real"})
+        self.assertEqual(problem, "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

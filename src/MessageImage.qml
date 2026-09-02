@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Widgets
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -38,8 +37,8 @@ Item {
   readonly property real drawHeight: Math.min(maxHeight, drawWidth * ratio)
 
   property string path: ""
-  // The picture's load state, kept here because the Image itself lives in a
-  // Component below and cannot be reached by id from the rows that ask.
+  // The picture's load state, mirrored here because the spinner and the
+  // failure line are drawn beside the Image rather than inside it.
   property int pictureStatus: Image.Null
   property string problem: ""
   property bool loading: false
@@ -82,47 +81,38 @@ Item {
     border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
     clip: true
 
-    // The picture, clipped to the corners above rather than to the box they
-    // are cut out of: `clip: true` on a Rectangle clips children to its
-    // bounding box and not to its radius, so a photograph came out square
-    // inside a rounded frame. Only the picture goes inside the
-    // ClippingRectangle - its render pass hides what it wraps from the input
-    // system, so the MouseArea below has to stay out of it.
+    // The picture, drawn plainly and clipped to this Rectangle's bounding box.
     //
-    // The software scene graph cannot draw that render pass at all, and would
-    // drop the picture rather than square it. That is what the offscreen
-    // harness runs on, so there the plain Image stands in.
-    readonly property bool canRoundPictures: GraphicsInfo.api !== GraphicsInfo.Software
-
-    Loader {
-      anchors.fill: parent
-      sourceComponent: canRoundPictures ? roundedPicture : picture
-    }
-
-    Component {
-      id: roundedPicture
-      ClippingRectangle {
-        color: "transparent"
-        radius: Style.space(5)
-        Loader { anchors.fill: parent; sourceComponent: picture }
-      }
-    }
-
-    Component {
+    // It used to go inside a `ClippingRectangle` so that its corners followed
+    // the frame's radius instead of being square inside it. On the machine
+    // this was written on that drew no picture at all: a clickable, empty box
+    // where the screenshot should be, with the whole thing still one click
+    // from the viewer - which is exactly how it was reported. The clip is a
+    // ShaderEffect over a ShaderEffectSource, and this plugin's harness runs
+    // offscreen on the software scene graph, which stands aside for a plain
+    // Image - so the one configuration that was broken was also the one
+    // configuration no screenshot here could ever show.
+    //
+    // Square corners on a photograph inside a rounded frame is a thing worth
+    // fixing. It is not worth fixing with a render path that cannot be tested,
+    // for a picture that was not being drawn at all. `Avatar.qml` has the same
+    // clip on a round plate; it is left alone for now, since a face there is
+    // initials most of the time and nobody has reported one missing - but it
+    // is the same shape of risk.
+    Image {
       id: picture
-      Image {
-        source: root.path !== "" ? "file://" + root.path : ""
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-        cache: true
-        // The full-size picture can be thousands of pixels; decoding it at the
-        // size actually drawn keeps a transcript of photographs from eating
-        // hundreds of megabytes in the shell process.
-        sourceSize.width: Math.round(root.drawWidth * 2)
-        visible: status === Image.Ready
-        onStatusChanged: root.pictureStatus = status
-        Component.onCompleted: root.pictureStatus = status
-      }
+      anchors.fill: parent
+      source: root.path !== "" ? "file://" + root.path : ""
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      cache: true
+      // The full-size picture can be thousands of pixels; decoding it at the
+      // size actually drawn keeps a transcript of photographs from eating
+      // hundreds of megabytes in the shell process.
+      sourceSize.width: Math.round(root.drawWidth * 2)
+      visible: status === Image.Ready
+      onStatusChanged: root.pictureStatus = status
+      Component.onCompleted: root.pictureStatus = status
     }
 
     Spinner {

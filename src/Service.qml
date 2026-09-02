@@ -401,6 +401,12 @@ Item {
     threadTs = ""
     threadParent = null
     anchorTs = String(anchor || "")
+    // Another conversation's canvas is not this one's, and the transcript that
+    // is about to land says whether this one has any.
+    canvasFileId = ""
+    canvasOpen = false
+    canvas = null
+    canvasError = ""
     // A different conversation, so what is on screen belongs to the last one.
     messages = []
     draft = ""
@@ -462,6 +468,10 @@ Item {
     messages = []
     messagesError = ""
     draft = ""
+    canvasFileId = ""
+    canvasOpen = false
+    canvas = null
+    canvasError = ""
   }
 
   function openThread(parentTs, parentRow) {
@@ -517,6 +527,74 @@ Item {
       // Reading a thread is reading it. Slack has no method for a thread's read
       // mark, so this is remembered on this machine - see threadRead below.
       if (root.threadTs !== "" && root.messages.length > 0) root.threadRead()
+      // Whether this channel keeps a canvas. It arrives with the transcript
+      // because the helper can answer it there for one cheap request; nothing
+      // is downloaded until somebody presses the button.
+      if (root.threadTs === "") root.canvasFileId = String(parsed.canvasFileId || "")
+    }
+  }
+
+  // ---- the channel's canvas ----------------------------------------------
+  //
+  // A channel canvas is the document pinned to the top of a channel, and until
+  // now reading one meant leaving for Slack. It is fetched only when asked
+  // for: it is a document, and most of the time it is not what was being
+  // opened.
+
+  property string canvasFileId: ""
+  property var canvas: null
+  property bool canvasOpen: false
+  property bool canvasLoading: false
+  property string canvasError: ""
+
+  readonly property bool hasCanvas: canvasFileId !== ""
+
+  function toggleCanvas() {
+    if (canvasOpen) {
+      canvasOpen = false
+      return
+    }
+    if (!hasCanvas || !openConversation) return
+    canvasOpen = true
+    // Kept from last time where it is the same one: a canvas is a document
+    // somebody is reading beside the conversation, and re-fetching it on every
+    // glance would mean the pane going blank each time it opened.
+    if (canvas && String(canvas.fileId) === canvasFileId) return
+    loadCanvas()
+  }
+
+  function loadCanvas() {
+    if (!openConversation || canvasFileId === "" || pluginDir === "") return
+    if (canvasProc.running) canvasProc.running = false
+    canvasError = ""
+    canvasLoading = true
+    var command = ["python3", helper(), "canvas", "--account", alias,
+                   "--channel", String(openConversation.id), "--file", canvasFileId]
+    if (demo) command.push("--demo")
+    canvasProc.command = command
+    canvasProc.running = true
+  }
+
+  Process {
+    id: canvasProc
+    running: false
+    stdout: StdioCollector { id: canvasOut; waitForEnd: true }
+    stderr: StdioCollector { id: canvasErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.canvasLoading = false
+      var parsed = Model.parseJson(canvasOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.canvasError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(canvasErr.text || "Could not read this canvas", 160)
+        return
+      }
+      root.canvasError = ""
+      root.canvas = parsed.canvas || null
+      // The channel said it had one and the helper found none - somebody
+      // deleted it, or emptied it. Take the button away rather than leaving it
+      // to fail again.
+      if (!root.canvas) root.canvasFileId = ""
     }
   }
 

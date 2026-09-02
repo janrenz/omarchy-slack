@@ -143,6 +143,15 @@ fatal QML error makes it exit instead.
 
 ## Things that will surprise you
 
+- **The offscreen harness runs the software scene graph, so a shader path is
+  invisible to every screenshot in this repo.** `QT_QPA_PLATFORM=offscreen`
+  forces it whatever `QSG_RHI_BACKEND` says, and `GraphicsInfo.api ===
+  GraphicsInfo.Software` is what `Avatar.qml` and `MessageImage.qml` branch on.
+  A `ClippingRectangle` - a ShaderEffect over a ShaderEffectSource - therefore
+  cannot be photographed here at all, and one drew *no picture* on real
+  hardware for a whole release while every shot in the repo looked right.
+  `MessageImage.qml` no longer uses one. If you reach for one, test it in a real
+  shell (`omarchy-restart-shell`, then look), not in the harness.
 - **A toast is a route back in, and it survives a shell restart.** Notifications
   go out through `omarchy-notification-send`, whose `--exec` becomes the
   `omarchy-exec-argv` hint: the click action rides as *data*, so omarchy can

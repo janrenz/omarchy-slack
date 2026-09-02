@@ -42,6 +42,7 @@ Column {
     ["u", "Show only what is unread", "Doing"],
     ["m", "Mark this conversation read", "Doing"],
     ["r", "Reload this conversation", "Doing"],
+    ["c", "Read this channel's canvas, and go back again", "Doing"],
     [",", "Settings", "Doing"],
     ["?", "This list", "Doing"]
   ]

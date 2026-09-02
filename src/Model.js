@@ -307,6 +307,10 @@ function conversationRow(row, presence) {
     presence: (found && found.state) ? String(found.state) : "",
     avatar: String(row.avatar || ""),
     private: row.private === true,
+    // Starred in Slack. The helper has already sorted these to the top of
+    // their section; the row carries it so the sidebar can say why one is
+    // there rather than leaving the order looking arbitrary.
+    starred: row.starred === true,
     // Whether this row was given a preview this poll. One that was not is
     // still perfectly openable; it has nothing to say about what is in it.
     current: row.current === true,

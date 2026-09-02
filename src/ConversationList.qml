@@ -169,9 +169,25 @@ Column {
             border.color: Model.presenceColor(line.modelData.presence, root.palette)
           }
 
+          // Starred in Slack. The helper has already put these at the top of
+          // their section, and an order with nothing to explain it reads as
+          // the sidebar having shuffled itself - so the row says so. Dim and
+          // small: it is a reason, not a thing to look at.
+          Text {
+            id: star
+            anchors.verticalCenter: title.verticalCenter
+            visible: !line.inert && !line.isMore && line.modelData.starred === true
+            text: "★"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
           Text {
             id: title
             width: parent.width - (bareDot.visible ? bareDot.width + parent.spacing : 0)
+                   - (star.visible ? star.width + parent.spacing : 0)
                    - (badge.visible ? badge.width + parent.spacing : 0)
             text: String(line.modelData.title || "")
             textFormat: Text.PlainText

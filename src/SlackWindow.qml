@@ -870,6 +870,7 @@ Item {
           else if (text === "t") root.openThreadHere()
           else if (text === "a") root.askAgent()
           else if (text === "r") service.reloadConversation()
+          else if (text === "c") service.toggleCanvas()
           else if (text === "u") service.unreadOnly = !service.unreadOnly
           else if (text === "m") service.markCurrentRead()
           else if (text === "f") root.startFiltering()
@@ -1029,6 +1030,24 @@ Item {
                 fontFamily: Style.font.family
                 fontSize: Style.font.caption
                 onClicked: root.toggleListDrawer()
+              }
+
+              // The document pinned to the top of this channel. Only where
+              // there is one, which the transcript said when it landed - a
+              // button offering a canvas that does not exist is worse than no
+              // button, and every channel would have had one.
+              Button {
+                visible: service.hasCanvas && !service.inThread && !root.showSettings
+                text: "Canvas"
+                tooltipText: service.canvasOpen
+                  ? "Back to the conversation  (c)"
+                  : "Read this channel's canvas  (c)"
+                selected: service.canvasOpen
+                bordered: true
+                foreground: service.canvasOpen ? Color.accent : Color.foreground
+                fontFamily: Style.font.family
+                fontSize: Style.font.caption
+                onClicked: service.toggleCanvas()
               }
 
               Button {
@@ -1465,10 +1484,115 @@ Item {
                   fg: Color.foreground
                 }
 
+                // The channel's canvas, in the transcript's own space rather
+                // than over it: it is a document to read, and a document read
+                // through a popup that closes on the first click elsewhere is
+                // a document nobody reads. The composer stays where it is, so
+                // the answer to what the canvas says can be typed while it is
+                // still on screen.
+                ScrollView {
+                  id: canvasPane
+                  width: parent.width
+                  visible: service.canvasOpen
+                  height: transcript.height
+                  clip: true
+
+                  Column {
+                    width: canvasPane.width - root.scrollGutter
+                    spacing: Style.spacing.sm
+
+                    Row {
+                      width: parent.width
+                      spacing: Style.spacing.sm
+
+                      Text {
+                        id: canvasTitle
+                        width: parent.width - canvasStamp.width - parent.spacing
+                        text: service.canvas ? String(service.canvas.title || "Canvas") : "Canvas"
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Color.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                      }
+
+                      Text {
+                        id: canvasStamp
+                        anchors.verticalCenter: canvasTitle.verticalCenter
+                        text: service.canvas ? Model.whenLabel(service.canvas.updated) : ""
+                        textFormat: Text.PlainText
+                        color: Qt.darker(Color.foreground, 1.5)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    LoadingRows {
+                      width: parent.width
+                      visible: service.canvasLoading && !service.canvas
+                      rows: 4
+                      fg: Color.foreground
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: service.canvasError !== ""
+                      text: service.canvasError
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
+                      color: Color.urgent
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    SelectableText {
+                      width: parent.width
+                      visible: text !== ""
+                      // Escaped first, then the links put back from their
+                      // offsets - the same way a message is built, and for the
+                      // same reason: a canvas is somebody else's document and
+                      // it does not get to choose its own markup.
+                      readonly property bool linked: !!service.canvas
+                        && Model.hasLink(service.canvas.text, service.canvas.links)
+                      text: {
+                        if (!service.canvas) return ""
+                        var body = String(service.canvas.text || "")
+                        return linked ? Model.linkify(body,
+                                                      service.themeColors.blue
+                                                      || service.themeColors.accent || "",
+                                                      service.canvas.links)
+                                      : body
+                      }
+                      textFormat: linked ? TextEdit.RichText : TextEdit.PlainText
+                      onLinkActivated: function(url) { service.openUrl(url) }
+                      HoverHandler {
+                        enabled: parent.hoveredLink !== ""
+                        cursorShape: Qt.PointingHandCursor
+                      }
+                      color: Color.foreground
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: !!service.canvas && service.canvas.truncated === true
+                      text: "This canvas is longer than the pane will show."
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
+                      color: Qt.darker(Color.foreground, 1.5)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+
                 ScrollView {
                   id: transcript
                   width: parent.width
-                  visible: !(service.messagesLoading && service.messages.length === 0)
+                  visible: !service.canvasOpen
+                           && !(service.messagesLoading && service.messages.length === 0)
                   height: parent.height - composerBox.height - answer.height
                           - parent.spacing * (service.inThread ? 4 : 2)
                           - (service.inThread ? threadBack.implicitHeight + Style.spacing.sm * 2 : 0)
@@ -1670,6 +1794,68 @@ Item {
                                     color: Color.foreground
                                     font.family: Style.font.family
                                     font.pixelSize: Style.font.bodySmall
+                                  }
+
+                                  // Answer in a thread. The chip below opens a
+                                  // thread that already has replies, and `t`
+                                  // opened one on the message under the
+                                  // cursor - but starting a thread with the
+                                  // mouse, on a message nobody had replied to
+                                  // yet, could not be done at all. Which is
+                                  // most of them: a thread is what you start
+                                  // when the answer would derail the channel.
+                                  //
+                                  // Beside the plus and quiet like it, because
+                                  // both are things you do to one message and
+                                  // neither is worth a column of glyphs down a
+                                  // transcript nobody is touching.
+                                  Rectangle {
+                                    id: replyInThread
+                                    anchors.right: addReaction.visible
+                                                   ? addReaction.left : parent.right
+                                    anchors.rightMargin: addReaction.visible
+                                                         ? Style.spacing.xs : root.scrollGutter
+                                    anchors.top: parent.top
+                                    width: threadGlyph.implicitWidth + Style.spacing.md
+                                    height: addReaction.height
+                                    radius: height / 2
+                                    visible: lineText.visible && !reactions.picking
+                                             && !service.inThread && service.canPost
+                                    opacity: threadReplyPointer.containsMouse ? 1.0
+                                           : (lineHover.hovered || lineBox.cursored) ? 0.55 : 0.0
+                                    Behavior on opacity { NumberAnimation { duration: 120 } }
+                                    color: threadReplyPointer.containsMouse
+                                      ? Qt.rgba(Color.foreground.r, Color.foreground.g,
+                                                Color.foreground.b, 0.14)
+                                      : Qt.rgba(Color.foreground.r, Color.foreground.g,
+                                                Color.foreground.b, 0.06)
+
+                                    Text {
+                                      id: threadGlyph
+                                      anchors.centerIn: parent
+                                      text: "↩"
+                                      textFormat: Text.PlainText
+                                      color: Qt.darker(Color.foreground, 1.4)
+                                      font.family: Style.font.family
+                                      font.pixelSize: Style.font.caption
+                                    }
+
+                                    MouseArea {
+                                      id: threadReplyPointer
+                                      anchors.fill: parent
+                                      hoverEnabled: true
+                                      cursorShape: Qt.PointingHandCursor
+                                      onClicked: {
+                                        root.cursorMessageId = String(line.modelData.id)
+                                        service.openThread(String(line.modelData.threadTs
+                                          || line.modelData.ts), line.modelData)
+                                        root.focusPane = "conversation"
+                                        // Straight into the box: pressing this
+                                        // is saying you have an answer, not
+                                        // that you would like to look at one.
+                                        Qt.callLater(root.focusComposer)
+                                      }
+                                    }
                                   }
 
                                   // A plus rather than a face, so it does not

@@ -153,6 +153,15 @@ ShellRoot {
       panel.openThreadHere()
     }
 
+    // The channel's canvas, open or shut. The button only appears on a channel
+    // that has one, so this is also how a script checks that a channel that
+    // has none is offered nothing.
+    function canvas(): string {
+      panel.slackService.toggleCanvas()
+      return JSON.stringify({ has: panel.slackService.hasCanvas,
+                              open: panel.slackService.canvasOpen })
+    }
+
 
 
 

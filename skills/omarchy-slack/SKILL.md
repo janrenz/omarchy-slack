@@ -33,11 +33,19 @@ settings, e.g. `work`. `python3 $HELPER list` names the ones that are set up.
     python3 $HELPER search    --account work --query "in:#design deploy" --top 20
     python3 $HELPER directory --account work --query "renz"
     python3 $HELPER presence  --account work --user U0123
+    python3 $HELPER canvas    --account work --channel C0123
 
 `messages` is the transcript the user is looking at: newest last, each row with
 `ts`, the author, the text already flattened out of Slack's mrkdwn, reactions
 and thread counts. `--thread <parent ts>` gives one thread's replies instead —
-if the handover named an open thread, that is what is on screen.
+if the handover named an open thread, that is what is on screen. It also says
+`canvasFileId` when the channel keeps a canvas.
+
+`canvas` is that document, as text with its links as offsets into it — the
+charter or runbook pinned to the top of a channel, which is often where the
+convention a message is arguing about is actually written down. `--file <id>`
+skips the lookup when `messages` already named one, and an answer with
+`"canvas": null` means the channel keeps none.
 
 `fetch` is the sidebar: which conversations exist, what is unread. It is served
 from a cache the window keeps warm, so it is cheap; `--fresh` forces the
