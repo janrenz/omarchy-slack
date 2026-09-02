@@ -150,6 +150,12 @@ Item {
   property string focusPane: "list"
   property bool showHelp: false
 
+  // Whether the canvas editor draws the page as well as the source. Kept on
+  // the window rather than in the service: it is how somebody likes to write,
+  // not anything about the document, and it should still be how they like it
+  // the next canvas they open.
+  property bool canvasPreview: true
+
   // ---- the picture being looked at ----------------------------------------
   //
   // A layer of the window rather than a handoff. Empty when nothing is open.
@@ -480,6 +486,7 @@ Item {
 
   function scrollTarget() {
     if (listDrawerOpen) return drawerScroll
+    if (service.reading && canvasPane.visible) return canvasPane
     if (focusPane === "conversation" && service.reading && transcript.visible) return transcript
     return sidebarScroll.visible ? sidebarScroll : null
   }
@@ -864,6 +871,20 @@ Item {
           if (root.pickingMessageId !== "") {
             if (text >= "1" && text <= "9") root.reactWith(Number(text) - 1)
             else if (text === "e" || text === "+") root.pickingMessageId = ""
+            return
+          }
+          if (service.canvasOpen) {
+            // There is no message under the cursor in the canvas pane, so the
+            // keys that act on one mean the document instead.
+            if (text === "e") service.editCanvas(false)
+            else if (text === "r") service.loadCanvas()
+            else if (text === "c") service.toggleCanvas()
+            else if (text === "n") root.openSwitcher()
+            else if (text === "/") root.openSearch()
+            else if (text === ",") root.showSettings = !root.showSettings
+            else if (text === "?") root.showHelp = !root.showHelp
+            else if (text === "g") root.scrollToEnd(view, false)
+            else if (text === "G") root.scrollToEnd(view, true)
             return
           }
           if (text === "e" || text === "+") root.startPicking()
@@ -1429,6 +1450,7 @@ Item {
               }
 
               Column {
+                id: reading
                 anchors.fill: parent
                 // Narrow, this column stands where the sidebar would and has
                 // to give the marker gutter back itself; wide, the sidebar has
@@ -1436,6 +1458,18 @@ Item {
                 anchors.leftMargin: columns.roomForBoth ? 0 : root.listGutter
                 spacing: root.padReading
                 visible: service.reading
+
+                // What is left for the transcript or the canvas once whatever
+                // sits under it has taken its share. Worked out in one place
+                // because the two panes are alternatives, and because what
+                // sits under them is not the same thing: a conversation has a
+                // box to answer in, and a canvas has no answering to do.
+                readonly property real bodyHeight: height - spacing
+                  - (service.canvasOpen ? canvasActions.height
+                                        : composerBox.height + answer.height + spacing)
+                  - (service.inThread ? threadBack.implicitHeight + Style.spacing.sm * 2
+                                        + spacing : 0)
+                  - (service.messagesError !== "" ? Style.space(20) + spacing : 0)
 
                 // A thread is a view of its own, and the way out of it is
                 // where the way in was: at the top, above what it contains.
@@ -1487,14 +1521,18 @@ Item {
                 // The channel's canvas, in the transcript's own space rather
                 // than over it: it is a document to read, and a document read
                 // through a popup that closes on the first click elsewhere is
-                // a document nobody reads. The composer stays where it is, so
-                // the answer to what the canvas says can be typed while it is
-                // still on screen.
+                // a document nobody reads.
+                //
+                // The message box is not here. A canvas is a document, not a
+                // conversation, and a box saying "Message" under one answers
+                // nothing that is written in it - so the pane is the document,
+                // the whole height of it, and what it offers instead is the
+                // way to write in the document itself.
                 ScrollView {
                   id: canvasPane
                   width: parent.width
-                  visible: service.canvasOpen
-                  height: transcript.height
+                  visible: service.canvasOpen && !service.canvasEditing
+                  height: reading.bodyHeight
                   clip: true
 
                   Column {
@@ -1526,6 +1564,20 @@ Item {
                         font.family: Style.font.family
                         font.pixelSize: Style.font.caption
                       }
+                    }
+
+                    // Why this canvas is not one to rewrite here, when it is
+                    // not. Under the title rather than beside the buttons: it
+                    // is a sentence, and it is about the document.
+                    Text {
+                      width: parent.width
+                      visible: text !== ""
+                      text: service.canvasNote
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
+                      color: Qt.darker(Color.foreground, 1.4)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
                     }
 
                     LoadingRows {
@@ -1588,15 +1640,437 @@ Item {
                   }
                 }
 
+                // The same canvas, being written.
+                //
+                // A source pane with the page rendered beside it, rather than
+                // one box pretending to be the page. Qt will render Markdown
+                // into an editable TextEdit and read it back as Markdown, so
+                // that much is free - but nothing in QML can put a bold run
+                // into one. There is no cursor formatting to reach from here,
+                // so the `**` has to be typed whatever the box looks like, and
+                // in the rendered box it would sit there as two asterisks
+                // until something reparsed the document under the cursor.
+                // Editing the source and watching the page keep up is the
+                // honest version of the same thing, and it is the one where
+                // the buttons along the top actually do something.
+                Item {
+                  id: canvasEditor
+                  width: parent.width
+                  visible: service.canvasOpen && service.canvasEditing
+                  height: reading.bodyHeight
+
+                  // Room for two columns of prose; below that the page goes
+                  // under the source rather than beside it. Never instead of
+                  // it: this is the pane somebody opened in order to type, and
+                  // a preview that took the keyboard away would be a strange
+                  // way to help.
+                  readonly property bool wide: width > Style.space(660)
+                  // The draft as the page, which is not quite the draft: no
+                  // canvas gets to ask this window to fetch a picture, and an
+                  // id is nobody's name.
+                  readonly property string rendered:
+                    Model.previewMarkdown(service.canvasDraft, service.canvasMentions)
+
+                  onVisibleChanged: if (visible) canvasSource.forceActiveFocus()
+
+                  // Around the selection, or around where the cursor is. Two
+                  // inserts rather than one assignment, so Ctrl+Z still knows
+                  // what happened.
+                  function around(before, after) {
+                    var start = canvasSource.selectionStart
+                    var end = canvasSource.selectionEnd
+                    canvasSource.insert(end, after)
+                    canvasSource.insert(start, before)
+                    canvasSource.select(start + before.length, end + before.length)
+                    canvasSource.forceActiveFocus()
+                  }
+
+                  // A marker at the start of every line the selection touches,
+                  // last line first so the earlier offsets still mean what they
+                  // meant when they were worked out.
+                  function lead(marker) {
+                    var text = canvasSource.text
+                    var from = canvasSource.selectionStart
+                    var to = canvasSource.selectionEnd
+                    var at = from > 0 ? text.lastIndexOf("\n", from - 1) + 1 : 0
+                    var starts = []
+                    while (at <= to) {
+                      starts.push(at)
+                      var next = text.indexOf("\n", at)
+                      if (next === -1 || next >= to) break
+                      at = next + 1
+                    }
+                    for (var i = starts.length - 1; i >= 0; i--)
+                      canvasSource.insert(starts[i], marker)
+                    canvasSource.forceActiveFocus()
+                  }
+
+                  Column {
+                    anchors.fill: parent
+                    spacing: Style.spacing.sm
+
+                    // Which document this is, and what is being done to it.
+                    // The read pane's own heading is not on screen while this
+                    // is, and "which canvas am I rewriting" is not a question
+                    // to have to leave the pane to answer.
+                    Row {
+                      id: canvasEditHead
+                      width: parent.width
+                      spacing: Style.spacing.sm
+
+                      Text {
+                        id: canvasEditTitle
+                        width: Math.max(0, parent.width - canvasEditWhat.width - parent.spacing)
+                        text: service.canvas ? String(service.canvas.title || "Canvas") : "Canvas"
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Color.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                      }
+
+                      Text {
+                        id: canvasEditWhat
+                        anchors.verticalCenter: canvasEditTitle.verticalCenter
+                        // The title is Slack's own and it puts it back above
+                        // whatever is saved, which is why it is not in the box.
+                        text: service.canvasAppending
+                          ? "adding to the end, in Markdown"
+                          : "rewriting all of it, in Markdown"
+                        textFormat: Text.PlainText
+                        color: Qt.darker(Color.foreground, 1.5)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Row {
+                      id: canvasTools
+                      width: parent.width
+                      spacing: Style.spacing.xs
+
+                      Button {
+                        text: "Bold"
+                        tooltipText: "**bold**  (Ctrl+B)"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.around("**", "**")
+                      }
+
+                      Button {
+                        text: "Italic"
+                        tooltipText: "*italic*  (Ctrl+I)"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.around("*", "*")
+                      }
+
+                      Button {
+                        text: "Code"
+                        tooltipText: "`code`"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.around("`", "`")
+                      }
+
+                      Button {
+                        text: "Link"
+                        tooltipText: "[words](https://…)  (Ctrl+K)"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.around("[", "](https://)")
+                      }
+
+                      Button {
+                        text: "Heading"
+                        tooltipText: "## a heading"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.lead("## ")
+                      }
+
+                      Button {
+                        text: "List"
+                        tooltipText: "- an item"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.lead("- ")
+                      }
+
+                      Button {
+                        text: "Task"
+                        tooltipText: "- [ ] something to do"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.lead("- [ ] ")
+                      }
+
+                      Button {
+                        text: "Quote"
+                        tooltipText: "> quoted"
+                        bordered: true
+                        foreground: Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: canvasEditor.lead("> ")
+                      }
+
+                      Button {
+                        text: root.canvasPreview ? "Page ✓" : "Page"
+                        tooltipText: canvasEditor.wide
+                          ? "The document as it will read, beside what you are typing"
+                          : "The document as it will read, in place of what you are typing"
+                        selected: root.canvasPreview
+                        bordered: true
+                        foreground: root.canvasPreview ? Color.accent : Color.foreground
+                        fontFamily: Style.font.family
+                        fontSize: Style.font.caption
+                        onClicked: root.canvasPreview = !root.canvasPreview
+                      }
+                    }
+
+                    // Laid out by hand rather than by a Row, because the two
+                    // panes sit side by side or one above the other depending
+                    // on how much room there is, and that is two layouts.
+                    Item {
+                      id: panes
+                      width: parent.width
+                      height: parent.height - canvasTools.height - canvasEditHead.height
+                              - parent.spacing * 2
+
+                      readonly property real gap: Style.spacing.md
+                      readonly property real sourceWidth: root.canvasPreview && canvasEditor.wide
+                        ? (width - gap) / 2 : width
+                      readonly property real sourceHeight: root.canvasPreview && !canvasEditor.wide
+                        ? (height - gap) / 2 : height
+
+                      Rectangle {
+                        width: panes.sourceWidth
+                        height: panes.sourceHeight
+                        radius: Style.space(5)
+                        color: Qt.rgba(Color.foreground.r, Color.foreground.g,
+                                       Color.foreground.b, 0.06)
+                        border.width: Style.space(1)
+                        border.color: canvasSource.activeFocus
+                          ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.7)
+                          : Qt.rgba(Color.foreground.r, Color.foreground.g,
+                                    Color.foreground.b, 0.15)
+
+                        ScrollView {
+                          anchors.fill: parent
+                          anchors.margins: Style.spacing.sm
+                          clip: true
+
+                          TextArea {
+                            id: canvasSource
+                            placeholderText: service.canvasAppending
+                              ? "What to add to the end of this canvas"
+                              : "This canvas, in Markdown"
+                            wrapMode: TextArea.Wrap
+                            color: Color.foreground
+                            placeholderTextColor: Qt.darker(Color.foreground, 1.5)
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.bodySmall
+                            background: null
+                            text: service.canvasDraft
+                            onTextChanged: if (text !== service.canvasDraft)
+                              service.canvasDraft = text
+                            // Shift+Enter saves, the way it sends in the
+                            // message box - Enter is a newline in a document
+                            // above all else. Escape hands the keyboard back
+                            // without throwing away what has been typed;
+                            // Cancel is how a draft is discarded, and it says
+                            // so.
+                            Keys.onPressed: function(event) {
+                              if (event.key === Qt.Key_Escape) {
+                                root.leaveComposer()
+                                event.accepted = true
+                                return
+                              }
+                              if (event.modifiers & Qt.ControlModifier) {
+                                if (event.key === Qt.Key_B) {
+                                  canvasEditor.around("**", "**")
+                                  event.accepted = true
+                                } else if (event.key === Qt.Key_I) {
+                                  canvasEditor.around("*", "*")
+                                  event.accepted = true
+                                } else if (event.key === Qt.Key_K) {
+                                  canvasEditor.around("[", "](https://)")
+                                  event.accepted = true
+                                }
+                                if (event.accepted) return
+                              }
+                              if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
+                              if (!(event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))) return
+                              service.saveCanvas()
+                              event.accepted = true
+                            }
+                          }
+                        }
+                      }
+
+                      ScrollView {
+                        id: canvasPage
+                        visible: root.canvasPreview
+                        x: canvasEditor.wide ? panes.sourceWidth + panes.gap : 0
+                        y: canvasEditor.wide ? 0 : panes.sourceHeight + panes.gap
+                        width: canvasEditor.wide ? panes.width - panes.sourceWidth - panes.gap
+                                                 : panes.width
+                        height: canvasEditor.wide ? panes.height
+                                                  : panes.height - panes.sourceHeight - panes.gap
+                        clip: true
+
+                        SelectableText {
+                          width: canvasPage.width - root.scrollGutter
+                          // The one place in this window where a document
+                          // chooses its own markup, which is why what it may
+                          // choose is settled in previewMarkdown first: no
+                          // pictures, no tags, and a link still has to get
+                          // past openUrl before anything opens.
+                          textFormat: TextEdit.MarkdownText
+                          text: canvasEditor.rendered
+                          onLinkActivated: function(url) { service.openUrl(url) }
+                          HoverHandler {
+                            enabled: parent.hoveredLink !== ""
+                            cursorShape: Qt.PointingHandCursor
+                          }
+                          color: Color.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.bodySmall
+                        }
+                      }
+                    }
+                  }
+                }
+
+                // What the canvas pane has instead of a message box. Reading:
+                // the two ways to write in it, and the way out to Slack for
+                // the things this window will not touch. Writing: saving it.
+                Row {
+                  id: canvasActions
+                  visible: service.canvasOpen
+                  spacing: Style.spacing.sm
+
+                  Button {
+                    visible: !service.canvasEditing && service.canvasReplaceable
+                    text: "Edit"
+                    tooltipText: "Write in this canvas  (e)"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.editCanvas(false)
+                  }
+
+                  // Always, where the token may write at all: adding to the
+                  // end cannot lose what is already there, so it is what a
+                  // canvas this window may not rewrite still gets.
+                  Button {
+                    visible: !service.canvasEditing && service.canvasWritable
+                    text: "Add to the end"
+                    tooltipText: "Write something new at the bottom of this canvas, "
+                               + "leaving the rest of it alone"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.editCanvas(true)
+                  }
+
+                  Button {
+                    visible: service.canvasEditing
+                    enabled: !service.canvasSaving && service.canvasDraft.trim() !== ""
+                    text: service.canvasSaving
+                      ? "Saving…" : (service.canvasAppending ? "Add" : "Save")
+                    tooltipText: service.canvasAppending
+                      ? "Add this to the end of the canvas  (Shift+Enter)"
+                      : "Replace the canvas with what is in the box  (Shift+Enter)"
+                    bordered: true
+                    foreground: Color.accent
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.saveCanvas()
+                  }
+
+                  Button {
+                    visible: service.canvasEditing
+                    enabled: !service.canvasSaving
+                    text: "Cancel"
+                    tooltipText: "Leave the canvas as it is, and lose what is in the box"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.forgetCanvasEdit()
+                  }
+
+                  Button {
+                    visible: !service.canvasEditing
+                    enabled: !service.canvasLoading
+                    text: service.canvasLoading ? "Reading…" : "Reload"
+                    tooltipText: "Read this canvas from Slack again"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.loadCanvas()
+                  }
+
+                  // Only where there is somewhere to go: the canvases this
+                  // window will not rewrite are exactly the ones with
+                  // something in them that Slack's own editor is needed for.
+                  Button {
+                    visible: !service.canvasEditing && !!service.canvas
+                             && String(service.canvas.permalink || "") !== ""
+                    text: "Open in Slack"
+                    tooltipText: "Open this canvas in Slack, where anything this window "
+                               + "cannot write can be edited"
+                    bordered: true
+                    foreground: Color.foreground
+                    fontFamily: Style.font.family
+                    fontSize: Style.font.caption
+                    onClicked: service.openUrl(String(service.canvas.permalink))
+                  }
+
+                  // Only what went wrong with the last save. Everything else
+                  // this row could say is said in the pane above it, where
+                  // there is a width to say it in.
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(0, reading.width - Style.space(200))
+                    visible: text !== ""
+                    text: service.canvasSaveError
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    color: Color.urgent
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
                 ScrollView {
                   id: transcript
                   width: parent.width
                   visible: !service.canvasOpen
                            && !(service.messagesLoading && service.messages.length === 0)
-                  height: parent.height - composerBox.height - answer.height
-                          - parent.spacing * (service.inThread ? 4 : 2)
-                          - (service.inThread ? threadBack.implicitHeight + Style.spacing.sm * 2 : 0)
-                          - (service.messagesError !== "" ? Style.space(20) : 0)
+                  height: reading.bodyHeight
                   clip: true
 
                   // The newest message is at the bottom, so that is where a
@@ -2080,6 +2554,7 @@ Item {
                 Rectangle {
                   id: composerBox
                   width: parent.width
+                  visible: !service.canvasOpen
                   height: Style.space(84)
                   radius: Style.space(5)
                   color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.06)
@@ -2133,6 +2608,7 @@ Item {
 
                 Row {
                   id: answer
+                  visible: !service.canvasOpen
                   spacing: Style.spacing.sm
 
                   Button {

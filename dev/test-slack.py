@@ -1647,6 +1647,207 @@ class CanvasTitle(unittest.TestCase):
         self.assertEqual(body, "• een\n• twee")
 
 
+class CanvasMarkdown(unittest.TestCase):
+    """The same markup read a second way, as the source the editor edits.
+
+    This is the text a save sends back, so what it loses, the canvas loses.
+    Every test here is either a structure that has to survive the round trip
+    or a thing that must never be written at all.
+    """
+
+    def convert(self, markup):
+        return slack.canvas_markdown(markup)
+
+    def test_the_structure_prose_throws_away_is_kept(self):
+        body, _, lossy = self.convert(
+            "<h2>Rota</h2><ul><li>Ada<br/></li><li>Grace<br/></li></ul>"
+            "<p>See <a href=\"https://example.com/x\">the runbook</a>.</p>")
+        self.assertEqual(body, "## Rota\n\n- Ada\n- Grace\n\n"
+                               "See [the runbook](https://example.com/x).")
+        self.assertEqual(lossy, [])
+
+    def test_a_numbered_list_keeps_its_numbers_and_a_nested_one_its_indent(self):
+        body, _, _ = self.convert(
+            "<ol><li>first</li><li>second<ul><li>under it</li></ul></li></ol>")
+        self.assertEqual(body, "1. first\n2. second\n  - under it")
+
+    def test_a_table_gets_the_header_rule_markdown_needs(self):
+        body, _, _ = self.convert(
+            "<table><tr><th>Where</th><th>When</th></tr>"
+            "<tr><td>Live</td><td>at ten</td></tr></table>")
+        self.assertEqual(body, "| Where | When |\n| --- | --- |\n| Live | at ten |")
+
+    def test_a_checklist_stays_a_checklist(self):
+        body, _, _ = self.convert(
+            "<ul><li><input type=\"checkbox\" checked/>done</li>"
+            "<li><input type=\"checkbox\"/>todo</li></ul>")
+        self.assertEqual(body, "- [x] done\n- [ ] todo")
+
+    def test_text_that_looks_like_markup_comes_back_as_text(self):
+        """Invariant 3, in the other direction: a canvas that says `**hi**`
+        must not come back as bold, and must not be able to write a tag."""
+        body, _, _ = self.convert("<p>**hi** and &lt;b&gt;bold&lt;/b&gt; and [a](b)</p>")
+        self.assertEqual(body, r"\*\*hi\*\* and \<b>bold\</b> and \[a\](b)")
+
+    def test_a_line_that_would_become_a_list_is_escaped_and_one_that_would_not_is_left(self):
+        body, _, _ = self.convert("<p>- not a list</p><p>5 &gt; 3</p>")
+        self.assertEqual(body, "\\- not a list\n\n5 > 3")
+
+    def test_a_picture_is_never_written_and_is_said_out_loud(self):
+        """A remote image in Markdown is a fetch waiting to happen (invariant
+        2), and a canvas holding one is a canvas this window will not
+        replace - dropping somebody's screenshot is not an edit."""
+        body, _, lossy = self.convert(
+            "<p>before</p><p><img src=\"https://evil.example/x.png\"/></p><p>after</p>")
+        self.assertEqual(body, "before\n\nafter")
+        self.assertNotIn("evil.example", body)
+        self.assertEqual(lossy, ["a picture"])
+
+    def test_a_mention_keeps_the_id_slack_needs_back(self):
+        body, _, _ = self.convert("<p>Ask @U0123ABC</p>")
+        self.assertEqual(body, "Ask ![](@U0123ABC)")
+
+    def test_a_scheme_nobody_should_follow_loses_its_address_here_too(self):
+        body, _, _ = self.convert("<p><a href=\"javascript:alert(1)\">Click</a></p>")
+        self.assertEqual(body, "Click")
+
+    def test_a_code_block_is_fenced_and_not_escaped(self):
+        body, _, _ = self.convert("<pre>if a &lt; b:\n    go()</pre>")
+        self.assertEqual(body, "```\nif a < b:\n    go()\n```")
+
+    def test_a_canvas_too_long_to_read_says_so_because_it_may_not_be_saved(self):
+        body, truncated, _ = self.convert("<p>%s</p>" % ("x" * (slack.CANVAS_TEXT_CAP + 50)))
+        self.assertTrue(truncated)
+        self.assertTrue(len(body) <= slack.CANVAS_TEXT_CAP)
+
+    def test_the_title_heading_is_not_sent_back_because_slack_puts_it_there(self):
+        body = slack.drop_markdown_title("# On call\n\n- Ada", "On call")
+        self.assertEqual(body, "- Ada")
+
+    def test_a_heading_that_is_not_the_title_stays(self):
+        body = slack.drop_markdown_title("# Rota\n\n- Ada", "On call")
+        self.assertEqual(body, "# Rota\n\n- Ada")
+
+    def test_a_digest_ignores_trailing_space_and_nothing_else(self):
+        self.assertEqual(slack.canvas_digest("a  \nb\n"), slack.canvas_digest("a\nb"))
+        self.assertNotEqual(slack.canvas_digest("a\nb"), slack.canvas_digest("a\nB"))
+
+
+class CanvasWrite(unittest.TestCase):
+    """Saving a canvas, which replaces all of somebody else's document."""
+
+    MARKUP = ("<h1>On call</h1><p>Ada is on call.</p>")
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.original_state = slack.STATE_DIR
+        slack.STATE_DIR = self.state
+        self.sign_in("files:read,canvases:write")
+        self.markup = self.MARKUP
+        self.original_fetch = slack.fetch_canvas
+        slack.fetch_canvas = lambda url, token, timeout=30: self.markup
+
+    def tearDown(self):
+        slack.STATE_DIR = self.original_state
+        slack.fetch_canvas = self.original_fetch
+
+    def sign_in(self, scopes):
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1", "scopes": scopes,
+        }, private=True)
+
+    def current(self):
+        body, _, _ = slack.canvas_markdown(self.markup)
+        return slack.drop_markdown_title(body, "On call")
+
+    def args(self, **kwargs):
+        args = Args()
+        args.channel = "C1"
+        args.file = "F1"
+        args.operation = "replace"
+        args.markdown = "Grace is on call."
+        args.base = slack.canvas_digest(self.current())
+        args.stdin = False
+        args.demo = False
+        for key, value in kwargs.items():
+            setattr(args, key, value)
+        return args
+
+    def run_edit(self, args, answers=None):
+        answers = dict({"files.info": (True, {"file": {
+            "title": "On call", "url_private": "https://files.slack.com/x"}}),
+            "canvases.edit": (True, {})}, **(answers or {}))
+        sent = []
+
+        class Recorder(slack.Slack):
+            def call(self, method, params=None, timeout=20):
+                sent.append((method, params or {}))
+                return answers.get(method, (True, {}))
+
+        original = slack.Slack
+        slack.Slack = Recorder
+        try:
+            return capture(slack.cmd_canvas_edit, args), sent
+        finally:
+            slack.Slack = original
+
+    def test_a_save_replaces_the_whole_document_in_one_change(self):
+        payload, sent = self.run_edit(self.args())
+        self.assertTrue(payload["ok"])
+        edit = dict(sent)["canvases.edit"]
+        self.assertEqual(edit["canvas_id"], "F1")
+        # One change per call: Slack refuses an array with two in it.
+        changes = json.loads(edit["changes"])
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["operation"], "replace")
+        self.assertNotIn("section_id", changes[0])
+        self.assertEqual(changes[0]["document_content"],
+                         {"type": "markdown", "markdown": "Grace is on call."})
+
+    def test_a_canvas_somebody_else_has_edited_is_not_overwritten(self):
+        payload, sent = self.run_edit(self.args(base="a digest of something else"))
+        self.assertEqual(payload["error"]["code"], "canvas_changed")
+        self.assertNotIn("canvases.edit", dict(sent))
+
+    def test_a_save_that_changes_nothing_asks_slack_for_nothing(self):
+        payload, sent = self.run_edit(self.args(markdown=self.current()))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["unchanged"])
+        self.assertNotIn("canvases.edit", dict(sent))
+
+    def test_a_canvas_holding_a_picture_is_refused_rather_than_emptied(self):
+        self.markup = self.MARKUP + "<p><img src=\"https://files.slack.com/p.png\"/></p>"
+        payload, sent = self.run_edit(self.args(base=slack.canvas_digest(self.current())))
+        self.assertEqual(payload["error"]["code"], "not_editable")
+        self.assertIn("a picture", payload["error"]["message"])
+        self.assertNotIn("canvases.edit", dict(sent))
+
+    def test_adding_to_the_end_needs_no_digest_and_reads_nothing_first(self):
+        """The safe operation: it cannot overwrite what it never read."""
+        payload, sent = self.run_edit(self.args(operation="insert_at_end", base=""))
+        self.assertTrue(payload["ok"])
+        self.assertEqual([call[0] for call in sent], ["canvases.edit"])
+        self.assertEqual(json.loads(dict(sent)["canvases.edit"]["changes"])[0]["operation"],
+                         "insert_at_end")
+
+    def test_a_replace_without_a_digest_is_refused_before_anything_is_sent(self):
+        payload, sent = self.run_edit(self.args(base=""))
+        self.assertEqual(payload["error"]["code"], "no_base")
+        self.assertEqual(sent, [])
+
+    def test_a_token_that_may_not_write_says_so_rather_than_trying(self):
+        self.sign_in("files:read")
+        payload, sent = self.run_edit(self.args())
+        self.assertEqual(payload["error"]["code"], "permission_required")
+        self.assertIn("canvases:write", payload["error"]["message"])
+        self.assertEqual(sent, [])
+
+    def test_the_demo_writes_nothing(self):
+        payload, sent = self.run_edit(self.args(demo=True))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(sent, [])
+
+
 class Favourites(unittest.TestCase):
     """Starred conversations - what Slack's own sidebar calls a favourite."""
 

@@ -21,7 +21,7 @@ const Model = new Function(
     "escapeHtml, usableSpans, safeHref, densityScale, densityNames, sortNames, reactionIsMine, " +
     "presenceColor, presenceLabel, presenceWanted, presenceWantedFromRows, " +
     "switcherRows, searchRows, fileLabel, " +
-    "threadLabel, coverageLabel }"
+    "threadLabel, coverageLabel, previewMarkdown, canvasNote }"
 )()
 
 let passed = 0
@@ -554,6 +554,37 @@ test("broken JSON is a fallback and not an exception", () => {
 test("one line stays one line", () => {
   eq(Model.oneLine("  a\n  b  "), "a b")
   eq(Model.oneLine("abcdef", 4), "abc…")
+})
+
+test("a canvas preview draws no picture, whoever asked for one", () => {
+  // The one Markdown construct that reaches the network by itself, and the
+  // reason a canvas does not get to choose what a renderer fetches.
+  eq(Model.previewMarkdown("before ![shot](https://evil.example/x.png) after"),
+     "before shot after")
+  eq(Model.previewMarkdown("![](https://evil.example/x.png)"), "")
+  eq(Model.previewMarkdown("a <img src=\"https://evil.example/y.png\"> b"), "a  b")
+})
+
+test("a mention becomes the person, and keeps its id when nobody knows them", () => {
+  eq(Model.previewMarkdown("Ask ![](@U0123ABC) today", { U0123ABC: "Ada Lovelace" }),
+     "Ask @Ada Lovelace today")
+  eq(Model.previewMarkdown("Ask ![](@U0123ABC)"), "Ask @U0123ABC")
+})
+
+test("the formatting a canvas came with is left alone", () => {
+  const source = "# Rota\n\n- **Ada**\n- Grace\n\n[runbook](https://example.com/x)"
+  eq(Model.previewMarkdown(source), source)
+})
+
+test("a canvas says why it cannot be rewritten here", () => {
+  eq(Model.canvasNote(null), "")
+  eq(Model.canvasNote({ canWrite: true, markdown: "- Ada", lossy: [] }), "")
+  ok(Model.canvasNote({ canWrite: false, markdown: "- Ada", lossy: [] })
+       .indexOf("canvases:write") !== -1)
+  ok(Model.canvasNote({ canWrite: true, markdown: "- Ada", lossy: ["a picture"] })
+       .indexOf("a picture") !== -1)
+  ok(Model.canvasNote({ canWrite: true, markdown: "x", truncated: true, lossy: [] })
+       .indexOf("longer than") !== -1)
 })
 
 // ----------------------------------------------------------------

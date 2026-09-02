@@ -43,6 +43,7 @@ Column {
     ["m", "Mark this conversation read", "Doing"],
     ["r", "Reload this conversation", "Doing"],
     ["c", "Read this channel's canvas, and go back again", "Doing"],
+    ["e", "In a canvas: write in it", "Doing"],
     [",", "Settings", "Doing"],
     ["?", "This list", "Doing"]
   ]

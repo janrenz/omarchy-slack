@@ -186,6 +186,74 @@ function autoLinked(plain, tint) {
   })
 }
 
+// ------------------------------------------------------------------ canvases
+
+// A canvas's Markdown, as something safe to put in front of a renderer.
+//
+// Rendered Markdown is the one place in this window where a document does
+// choose its own markup, so what it may choose is settled here first. Two
+// things are taken out and everything else is left alone:
+//
+//   - Every picture. `![](https://evil/)` renders as a request to a host
+//     nobody vetted, which is the fetch invariant 2 exists to prevent, and it
+//     is the one Markdown construct that reaches the network by itself.
+//   - Every tag. The helper escapes `<` on the way out so a canvas cannot
+//     write one, but this also renders what the person editing has typed, and
+//     an editor is not the place to find out what `<img>` does.
+//
+// Slack writes a mention as a picture pointing at a user id rather than at a
+// host - `![](@U0123ABC)` - which names nowhere to fetch from. Those become
+// the person's name, which is what the id was standing in for.
+function previewMarkdown(markdown, names) {
+  var people = names || {}
+  return String(markdown === undefined || markdown === null ? "" : markdown)
+    .replace(/!\[[^\]]*\]\(\s*@([UWB][A-Z0-9]{2,})\s*\)/g, function(match, id) {
+      var found = people[id]
+      return "@" + String(found ? found : id)
+    })
+    .replace(/!\[[^\]]*\]\(\s*#(C[A-Z0-9]{2,})\s*\)/g, function(match, id) {
+      var found = people[id]
+      return "#" + String(found ? found : id)
+    })
+    // Anything still shaped like a picture is one, and none of them are drawn.
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]*>/g, "")
+}
+
+// Why this canvas is not one to edit here, in a sentence, or "" when it is.
+//
+// Said rather than shown as a disabled button with no explanation: every one
+// of these has something the reader can do about it, and two of them are not
+// the reader's fault at all.
+function canvasNote(canvas) {
+  if (!canvas) return ""
+  if (canvas.canWrite !== true) {
+    return "This token cannot write canvases. Add canvases:write to your Slack app, "
+         + "reinstall it, and paste the new token in Settings."
+  }
+  if (canvas.truncated === true || String(canvas.markdown || "") === "") {
+    return "This canvas is longer than this window can read, so it will not rewrite it. "
+         + "You can still add to the end of it."
+  }
+  var lossy = canvas.lossy || []
+  if (lossy.length > 0) {
+    return "This canvas holds " + listOf(lossy) + ", which this window cannot write back, "
+         + "so it will not rewrite it. You can still add to the end of it."
+  }
+  return ""
+}
+
+// "a picture", "a picture and an embed", "a, b and c".
+function listOf(phrases) {
+  var items = []
+  for (var i = 0; i < (phrases || []).length; i++) {
+    if (String(phrases[i])) items.push(String(phrases[i]))
+  }
+  if (items.length === 0) return "something"
+  if (items.length === 1) return items[0]
+  return items.slice(0, -1).join(", ") + " and " + items[items.length - 1]
+}
+
 // ---------------------------------------------------------------- presence
 
 // Slack knows two states where Teams knows nine: a person is active or they

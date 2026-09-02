@@ -129,6 +129,10 @@ CAPABILITIES = {
     "stars": ("stars:read",),
     # A channel's canvas is a file, and reading one is reading a file.
     "canvas": ("files:read",),
+    # Writing one is not: `canvases.edit` has a scope of its own, and an
+    # install from before this feature existed will not carry it - so the pane
+    # says the token cannot write rather than offering a Save that 403s.
+    "canvasEdit": ("canvases:write",),
 }
 
 # Everything a full install asks for, in the order the README lists them. Kept
@@ -141,7 +145,7 @@ WANTED_SCOPES = [
     "mpim:history", "mpim:read", "mpim:write",
     "chat:write", "reactions:read", "reactions:write",
     "users:read", "files:read", "files:write", "search:read", "emoji:read",
-    "stars:read",
+    "stars:read", "canvases:write",
 ]
 
 
@@ -2253,6 +2257,335 @@ def drop_repeated_title(body, links, title):
     return body[cut:], moved
 
 
+# --------------------------------------------------------------------------
+# the same canvas, as Markdown
+#
+# Prose is for reading, and it throws the structure away on purpose. Saving a
+# document back from it would flatten every heading, list and table it had, so
+# editing reads the markup a second way: `canvases.edit` takes Markdown, so
+# Markdown is what the editor edits and what goes back.
+#
+# Two rules keep what comes out safe to render as well as to send. Every
+# character that would otherwise be markup is escaped, so a canvas still does
+# not choose its own (invariant 3) - what it wrote as text comes back as text.
+# And no picture is ever written: `![](https://evil/)` is precisely the remote
+# fetch invariant 2 exists to stop, and Markdown put in front of a renderer is
+# a way to ask for one. Slack's own mention syntax is that same image form
+# pointed at a user id rather than a host - `![](@U0123ABC)` - and that one is
+# kept, because it names nowhere to fetch from.
+#
+# What cannot be written cannot be edited: a canvas holding a picture or an
+# embed comes back with `lossy` saying so, and the window offers to add to the
+# end of it rather than to replace it. A round trip through a converter that
+# quietly dropped somebody's screenshot would be a way to lose work, and the
+# whole document is what a save rewrites.
+# --------------------------------------------------------------------------
+
+_MD_HEADINGS = {"h1": "#", "h2": "##", "h3": "###",
+                "h4": "####", "h5": "#####", "h6": "######"}
+_MD_STRONG = frozenset(("b", "strong"))
+_MD_EM = frozenset(("i", "em"))
+_MD_STRIKE = frozenset(("s", "del", "strike"))
+# What a converter that only knows text cannot put back. `img` is the common
+# one - a canvas with a screenshot in it - and the rest are here so that a
+# canvas doing something clever is refused rather than emptied.
+_MD_LOSSY = {
+    "img": "a picture",
+    "svg": "a drawing",
+    "iframe": "an embed",
+    "video": "a video",
+    "audio": "a recording",
+    "object": "an embed",
+    "embed": "an embed",
+}
+_MD_ESCAPE = re.compile(r"([\\`*\[\]<|])")
+# What only means something at the start of a line, escaped there and left
+# alone in the middle of one: a paragraph that opens with a dash is a list
+# when it comes back, and "5 > 3" is not a quotation.
+_MD_LEAD = re.compile(r"^([-+>#|]|\d+[.)])")
+_MD_TYPE = re.compile(r"""(?is)\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
+_MD_CHECKED = re.compile(r"(?is)\bchecked\b")
+_MD_TITLE = re.compile(r"^#\s+(.*)$")
+
+
+def _md_plain(text):
+    """One line's worth of text with the escaping taken back off it.
+
+    Used to compare a heading with a title, which arrives unescaped.
+    """
+    return re.sub(r"\\(.)", r"\1", str(text or "")).strip()
+
+
+def canvas_markdown(markup):
+    """A canvas's markup as Markdown source, and what it could not carry.
+
+    Returns `(markdown, truncated, lossy)`. `lossy` is a list of plain
+    phrases - "a picture" - and an empty one is what makes the document safe
+    to write back, because a save replaces all of it.
+
+    Mentions stay as ids rather than becoming names: a name is what a reader
+    wants and an id is what Slack needs back, and this text is the one that
+    goes back. The window has the names and puts them in front of the reader.
+    """
+    text = _CANVAS_STRIP.sub("", _CANVAS_COMMENT.sub("", str(markup or "")))
+    lines = []
+    lossy = []
+    buf = []
+    prefix = ""
+    kind = ""
+    last_kind = ""
+    quote = 0
+    stack = []       # one entry per open list: None for bullets, a count for numbers
+    rows = None      # the table being built
+    cells = None     # the row being built
+    cell = None      # the cell being built
+    pre = None       # the lines of a code block, while one is open
+    code = 0         # inside `<code>`, where nothing is escaped
+    link = None      # (href, where in the buffer this link's words start)
+
+    def indent():
+        return "  " * max(0, len(stack) - 1)
+
+    def target():
+        return cell if cell is not None else buf
+
+    def add(words):
+        target().append(words)
+
+    def emit(line, line_kind=""):
+        # A blank line between blocks, and none between two items of the same
+        # list or two rows of the same table - which is what tells Markdown
+        # they are one list and one table rather than several.
+        nonlocal last_kind
+        if lines and lines[-1] != "" and not (line_kind and line_kind == last_kind):
+            lines.append("")
+        lines.append(line)
+        last_kind = line_kind
+
+    def flush():
+        """End the block being built, if anything was written into it."""
+        nonlocal buf, prefix, kind
+        body = "".join(buf)
+        head, block = prefix, kind
+        buf, prefix, kind = [], "", ""
+        parts = [part.strip() for part in body.split("\n")]
+        parts = [part for part in parts if part]
+        if not parts:
+            return
+        lead = "> " * quote + indent()
+        if head.startswith("#"):
+            # A heading is one line whatever the markup did inside it.
+            emit(lead + head + _MD_LEAD.sub(r"\\\1", " ".join(parts)), block)
+            return
+        parts = [_MD_LEAD.sub(r"\\\1", part) for part in parts]
+        # A line break inside a block stays one, and its continuation is
+        # indented under the marker so a two-line list item is still one item.
+        emit(lead + head + ("\\\n" + lead + ("  " if head else "")).join(parts), block)
+
+    def write_table(table):
+        table = [row for row in table if any(str(one).strip() for one in row)]
+        if not table:
+            return
+        width = max(len(row) for row in table)
+        for index, row in enumerate(table):
+            padded = list(row) + [""] * (width - len(row))
+            emit("| " + " | ".join(padded) + " |", "row")
+            if index == 0:
+                # Markdown has no table without a header rule under the first
+                # row, and a canvas table's first row is its header.
+                lines.append("| " + " | ".join(["---"] * width) + " |")
+
+    for match in _CANVAS_TOKEN.finditer(text):
+        piece = match.group(0)
+
+        if not piece.startswith("<"):
+            words = html_entities.unescape(piece)
+            if pre is not None:
+                pre.append(words)
+                continue
+            words = _CANVAS_SPACE.sub(" ", words)
+            if code:
+                # A backtick inside a code span would end it early, and there
+                # is no escaping one in Markdown without changing the fence.
+                add(words.replace("`", "'"))
+                continue
+            words = _MD_ESCAPE.sub(r"\\\1", words)
+            # Slack's own way of naming somebody, which survives the round
+            # trip; the escaping above has to be taken back off it.
+            words = _CANVAS_MENTION.sub(lambda found: "![](@%s)" % found.group(1), words)
+            add(words)
+            continue
+
+        name, closing = _canvas_tag(piece)
+
+        if pre is not None:
+            # Inside a code block the markup is the code.
+            if name == "pre" and closing:
+                body = "".join(pre).strip("\n")
+                pre = None
+                if body.strip():
+                    emit("```")
+                    lines.extend(body.split("\n"))
+                    lines.append("```")
+                    last_kind = ""
+            continue
+
+        if name in _MD_LOSSY:
+            if _MD_LOSSY[name] not in lossy:
+                lossy.append(_MD_LOSSY[name])
+            continue
+
+        if name == "pre":
+            if not closing:
+                flush()
+                pre = []
+            continue
+
+        if name == "code":
+            code = max(0, code + (-1 if closing else 1))
+            add("`")
+            continue
+
+        if name == "a":
+            if closing:
+                words = "".join(target()[link[1]:]) if link else ""
+                if link:
+                    del target()[link[1]:]
+                    href = link[0]
+                    if href and words.strip():
+                        # Angle brackets where the address has something in it
+                        # that would otherwise end the link early.
+                        if re.search(r"[\s()<>]", href):
+                            href = "<%s>" % href.replace(">", "%3E")
+                        add("[%s](%s)" % (words, href))
+                    else:
+                        add(words)
+                link = None
+            else:
+                found = _CANVAS_HREF.search(piece)
+                href = safe_link(found.group(1) or found.group(2) or found.group(3)) if found else ""
+                link = (href, len(target()))
+            continue
+
+        if name in _MD_STRONG:
+            add("**")
+            continue
+        if name in _MD_EM:
+            add("*")
+            continue
+        if name in _MD_STRIKE:
+            add("~~")
+            continue
+
+        if name == "input":
+            found = _MD_TYPE.search(piece)
+            sort = (found.group(1) or found.group(2) or found.group(3)) if found else ""
+            if sort.lower() == "checkbox" and prefix and not buf:
+                prefix += "[x] " if _MD_CHECKED.search(piece) else "[ ] "
+            continue
+
+        if name == "table":
+            if closing:
+                if cells:
+                    rows.append(cells)
+                write_table(rows or [])
+                rows = cells = cell = None
+            else:
+                flush()
+                rows, cells, cell = [], None, None
+            continue
+
+        if rows is not None:
+            if name == "tr":
+                if closing:
+                    if cells:
+                        rows.append(cells)
+                    cells = None
+                else:
+                    cells = []
+                continue
+            if name in _CANVAS_CELLS:
+                if closing:
+                    if cell is not None:
+                        if cells is None:
+                            cells = []
+                        cells.append(" ".join("".join(cell).split()))
+                    cell = None
+                else:
+                    cell = []
+                continue
+
+        if name in ("ul", "ol"):
+            flush()
+            if closing:
+                if stack:
+                    stack.pop()
+            else:
+                stack.append(0 if name == "ol" else None)
+            continue
+
+        if name == "li":
+            flush()
+            if not closing:
+                if stack and stack[-1] is not None:
+                    stack[-1] += 1
+                    prefix = "%d. " % stack[-1]
+                else:
+                    prefix = "- "
+                kind = "list"
+            continue
+
+        if name in _MD_HEADINGS:
+            flush()
+            if not closing:
+                prefix = _MD_HEADINGS[name] + " "
+            continue
+
+        if name == "hr":
+            flush()
+            emit("---")
+            continue
+
+        if name == "br":
+            add("\n")
+            continue
+
+        if name == "blockquote":
+            flush()
+            quote = max(0, quote + (-1 if closing else 1))
+            continue
+
+        if name in _CANVAS_PARAGRAPHS:
+            flush()
+            continue
+
+    flush()
+    body = "\n".join(lines).strip("\n")
+    truncated = len(body) > CANVAS_TEXT_CAP
+    if truncated:
+        # Only ever shown, never sent: a document this window could not read
+        # all of is one it refuses to replace.
+        body = body[:CANVAS_TEXT_CAP].rstrip()
+    return body, truncated, lossy
+
+
+def drop_markdown_title(body, title):
+    """The Markdown without the heading Slack makes out of the canvas's title.
+
+    Slack keeps the title above the document and puts it back on every full
+    replace whether it was sent or not, so sending it as well is how a canvas
+    ends up saying its own name twice - once more with every save.
+    """
+    name = str(title or "").strip()
+    if not name:
+        return body
+    first, _, rest = str(body or "").partition("\n")
+    found = _MD_TITLE.match(first.strip())
+    if not found or _md_plain(found.group(1)) != name:
+        return body
+    return rest.lstrip("\n")
+
+
 def canvas_ids(info):
     """Every canvas id a `conversations.info` answer names, best first.
 
@@ -2364,19 +2697,157 @@ def cmd_canvas(args):
         if mentioned else {}
     body, links, truncated = canvas_text(markup, names)
     body, links = drop_repeated_title(body, links, title)
-    out({
-        "ok": True,
-        "channel": args.channel,
-        "canvas": {
-            "fileId": file_id,
-            "title": title,
-            "permalink": safe_link(info.get("permalink") or ""),
-            "updated": iso_from_ts(info.get("edit_timestamp") or info.get("created") or 0),
-            "text": body,
-            "links": links,
-            "truncated": truncated,
-        },
-    })
+    out(dict({"ok": True, "channel": args.channel},
+             canvas=canvas_payload(file_id, info, title, body, links, truncated,
+                                   markup, names, granted(account, "canvasEdit"))))
+
+
+def canvas_payload(file_id, info, title, body, links, truncated,
+                   markup, names, may_write):
+    """One canvas, as both things the window needs it to be.
+
+    The prose and its link offsets are what the pane draws. The Markdown is
+    what the editor edits, and `editable` is the one flag that decides whether
+    the pane offers to replace the document at all: the token has to be
+    allowed to write, this window has to have read all of the document, and
+    the document has to hold nothing a converter cannot put back. A save
+    rewrites the whole canvas, so anything less than all three would be a way
+    to lose somebody else's work.
+    """
+    source, source_truncated, lossy = canvas_markdown(markup)
+    source = drop_markdown_title(source, title)
+    return {
+        "fileId": file_id,
+        "title": title,
+        "permalink": safe_link(info.get("permalink") or ""),
+        "updated": iso_from_ts(info.get("edit_timestamp") or info.get("created") or 0),
+        "text": body,
+        "links": links,
+        "truncated": truncated,
+        "markdown": source,
+        # Which version of the document that Markdown is, for a save to send
+        # back. Made here so the window never has to hash anything: what it
+        # holds is a token to hand over, not a claim it could get wrong.
+        "digest": canvas_digest(source),
+        # Whom the ids in that Markdown belong to. The editor keeps the ids,
+        # because they are what goes back; the names are for the reader.
+        "mentions": {key: str((value or {}).get("name") or key)
+                     for key, value in (names or {}).items()},
+        "canWrite": bool(may_write),
+        "lossy": lossy,
+        "editable": bool(may_write) and not source_truncated and not truncated and not lossy,
+    }
+
+
+def cmd_canvas_edit(args):
+    """Write a canvas back, as Markdown.
+
+    `replace` with no section id is the whole document, which is the only
+    shape this window can offer honestly: it reads a canvas as one piece of
+    text, so one piece of text is what it can put back. `insert_at_end` is the
+    other operation here, and it is the safe one - it adds without rewriting
+    anything, which is what a canvas holding a picture gets instead of an
+    edit.
+
+    Two things are checked before the whole document is overwritten. Slack's
+    copy has to still be the one that was opened - `--base` is a digest of the
+    Markdown the window was handed, and a canvas is a document several people
+    have open - and this window has to have been able to read all of it.
+    Neither is something Slack checks for us, and both are the difference
+    between saving an edit and deleting a colleague's paragraph.
+    """
+    body = str(args.markdown or "")
+    base = str(args.base or "")
+    if args.stdin:
+        payload = read_stdin_json()
+        body = str(payload.get("markdown") or "")
+        base = str(payload.get("base") or "")
+    body = body.strip()
+    if not body:
+        fail("empty", "There is nothing to save")
+    if args.operation == "replace" and not base:
+        # Not a nicety: without it a save is a blind overwrite of a shared
+        # document, and the window always has one to send.
+        fail("no_base", "Reload this canvas before saving it")
+
+    # Above this line nothing has been sent, so demo behaves like the real
+    # thing right up to the write and then does not make it.
+    if args.demo:
+        out({"ok": True, "canvasId": args.file or "demo-canvas", "operation": args.operation})
+
+    account = load_account(args.account)
+    if not granted(account, "canvasEdit"):
+        fail("permission_required", scope_error(CAPABILITIES["canvasEdit"]))
+    api = Slack(account["token"])
+
+    file_id = str(args.file or "")
+    if not file_id:
+        file_id = canvas_of(api, args.channel)
+        account = remember_scopes(args.account, account, api)
+        if not file_id:
+            fail("no_canvas", "This conversation has no canvas to write to")
+
+    if args.operation == "replace":
+        ok, payload = api.call("files.info", {"file": file_id})
+        account = remember_scopes(args.account, account, api)
+        if not ok:
+            fail("canvas_failed", friendly(payload.get("error", "")))
+        info = payload.get("file") or {}
+        try:
+            markup = fetch_canvas(info.get("url_private") or "", account.get("token", ""))
+        except AccountError as error:
+            fail(error.code, error.message)
+        title = str(info.get("title") or "").strip() or "Canvas"
+        current, current_truncated, lossy = canvas_markdown(markup)
+        current = drop_markdown_title(current, title)
+        if current_truncated:
+            fail("too_long", "This canvas is longer than this window can read, so it will "
+                             "not replace it. Edit it in Slack.")
+        if lossy:
+            fail("not_editable",
+                 "This canvas holds %s, which this window cannot write back. Add to the end "
+                 "of it instead, or edit it in Slack." % one_of(lossy))
+        if canvas_digest(current) != base:
+            fail("canvas_changed",
+                 "Somebody has edited this canvas since you opened it. Reload it and make "
+                 "your change again - saving now would undo theirs.")
+        if canvas_digest(body) == base:
+            # Nothing to say to Slack, and a rate limit to spend on saying it.
+            out({"ok": True, "canvasId": file_id, "operation": args.operation,
+                 "unchanged": True})
+
+    change = {"operation": args.operation,
+              "document_content": {"type": "markdown", "markdown": body}}
+    # One change per call: Slack refuses an array with two in it, which is why
+    # this command does one thing.
+    ok, payload = api.call("canvases.edit",
+                           {"canvas_id": file_id, "changes": json.dumps([change])})
+    remember_scopes(args.account, account, api)
+    if not ok:
+        code = payload.get("error", "")
+        if code in ("missing_scope", "not_allowed_token_type"):
+            fail("permission_required", scope_error(CAPABILITIES["canvasEdit"]))
+        fail("canvas_edit_failed", friendly(code))
+    out({"ok": True, "canvasId": file_id, "operation": args.operation})
+
+
+def canvas_digest(markdown):
+    """Which version of a canvas this is, ignoring how it is spaced.
+
+    Compared rather than shown, and only ever against another digest this
+    same function made: what matters is that a save and the document it was
+    made from are the same text, not what the digest is.
+    """
+    settled = "\n".join(line.rstrip() for line in str(markdown or "").strip().split("\n"))
+    return hashlib.sha256(settled.encode("utf-8")).hexdigest()
+
+
+def one_of(phrases):
+    """"a picture", "a picture and an embed", "a, b and c"."""
+    items = [str(phrase) for phrase in (phrases or []) if str(phrase)]
+    if len(items) <= 1:
+        return items[0] if items else "something"
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 # --------------------------------------------------------------------------
@@ -3504,20 +3975,22 @@ def demo_messages(channel, thread=""):
 DEMO_CANVAS_CHANNEL = "demo-channel-0"
 
 
+DEMO_CANVAS = (
+    "<h1>On call this week</h1>"
+    "<ul><li>Monday to Wednesday: <b>Ada</b></li><li>Thursday and Friday: Grace</li></ul>"
+    "<p>The runbook is at "
+    "<a href=\"https://example.com/runbook\">example.com/runbook</a>. "
+    "Page the second on call only after fifteen minutes.</p>"
+    "<table><tr><td>Staging</td><td>deploys on merge</td></tr>"
+    "<tr><td>Production</td><td>deploys at 10:00</td></tr></table>")
+
+
 def demo_canvas(channel):
-    body, links, truncated = canvas_text(
-        "<h1>On call this week</h1>"
-        "<ul><li>Monday to Wednesday: Ada</li><li>Thursday and Friday: Grace</li></ul>"
-        "<p>The runbook is at "
-        "<a href=\"https://example.com/runbook\">example.com/runbook</a>. "
-        "Page the second on call only after fifteen minutes.</p>"
-        "<table><tr><td>Staging</td><td>deploys on merge</td></tr>"
-        "<tr><td>Production</td><td>deploys at 10:00</td></tr></table>")
+    body, links, truncated = canvas_text(DEMO_CANVAS)
     body, links = drop_repeated_title(body, links, "On call this week")
-    return {"ok": True, "channel": channel, "canvas": {
-        "fileId": "demo-canvas", "title": "On call this week", "permalink": "",
-        "updated": iso_from_ts(time.time() - 3600), "text": body, "links": links,
-        "truncated": truncated}}
+    return {"ok": True, "channel": channel, "canvas": canvas_payload(
+        "demo-canvas", {"permalink": "", "edit_timestamp": int(time.time() - 3600)},
+        "On call this week", body, links, truncated, DEMO_CANVAS, {}, True)}
 
 
 # --------------------------------------------------------------------------
@@ -3587,6 +4060,22 @@ def main():
                              "here saves a conversations.info call")
     canvas.add_argument("--demo", action="store_true")
     canvas.set_defaults(func=cmd_canvas)
+
+    canvas_edit = with_account("canvas-edit", "write a channel's canvas back, as Markdown")
+    canvas_edit.add_argument("--channel", required=True, help="conversation id from a fetch")
+    canvas_edit.add_argument("--file", default="", help="the canvas's file id, when known")
+    canvas_edit.add_argument("--operation", default="replace",
+                             choices=("replace", "insert_at_end", "insert_at_start"),
+                             help="replace the whole document, or add to one end of it")
+    canvas_edit.add_argument("--markdown", default="",
+                             help="the document; --stdin is what the window uses")
+    canvas_edit.add_argument("--base", default="",
+                             help="the digest of the Markdown being edited, so a replace "
+                                  "cannot overwrite somebody else's newer version")
+    canvas_edit.add_argument("--stdin", action="store_true",
+                             help='read {"markdown": "...", "base": "..."} from stdin')
+    canvas_edit.add_argument("--demo", action="store_true")
+    canvas_edit.set_defaults(func=cmd_canvas_edit)
 
     send = with_account("send", "post a message")
     send.add_argument("--channel", required=True)

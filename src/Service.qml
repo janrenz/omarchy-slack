@@ -429,6 +429,7 @@ Item {
     canvasOpen = false
     canvas = null
     canvasError = ""
+    forgetCanvasEdit()
     // A different conversation, so what is on screen belongs to the last one.
     messages = []
     draft = ""
@@ -494,6 +495,7 @@ Item {
     canvasOpen = false
     canvas = null
     canvasError = ""
+    forgetCanvasEdit()
   }
 
   function openThread(parentTs, parentRow) {
@@ -573,6 +575,9 @@ Item {
 
   function toggleCanvas() {
     if (canvasOpen) {
+      // The draft stays. Shutting the pane to glance at the conversation is
+      // not the same as abandoning what was being written, and Cancel is
+      // there for when it is.
       canvasOpen = false
       return
     }
@@ -617,6 +622,110 @@ Item {
       // deleted it, or emptied it. Take the button away rather than leaving it
       // to fail again.
       if (!root.canvas) root.canvasFileId = ""
+    }
+  }
+
+  // ---- writing one back --------------------------------------------------
+  //
+  // A save replaces the whole document, because reading one reads all of it:
+  // `canvases.edit` can replace a section, but nothing this window drew
+  // remembers which section it came from. Everything careful below follows
+  // from that. The helper is handed back the digest it sent with the document,
+  // so a canvas somebody else has edited in the meantime is refused rather
+  // than overwritten; and a canvas whose Markdown did not come back whole -
+  // too long to read, or holding a picture this window cannot write - is
+  // never offered the replacing editor at all, only the box that adds to the
+  // end. Adding cannot lose anything; replacing can lose everything.
+
+  property bool canvasEditing: false
+  // Which of the two the editor is doing. Adding is the one that is always
+  // safe, and the only one a canvas with a picture in it gets.
+  property bool canvasAppending: false
+  property string canvasDraft: ""
+  property bool canvasSaving: false
+  property string canvasSaveError: ""
+
+  readonly property string canvasSource: canvas ? String(canvas.markdown || "") : ""
+  readonly property bool canvasWritable: !!canvas && canvas.canWrite === true
+  readonly property bool canvasReplaceable: !!canvas && canvas.editable === true
+  readonly property var canvasMentions: (canvas && canvas.mentions) || ({})
+  // Why not, when not - said out loud in the pane rather than left as a button
+  // that is greyed out for no stated reason.
+  readonly property string canvasNote: canvas ? Model.canvasNote(canvas) : ""
+  readonly property bool canvasDirty: canvasEditing
+    && canvasDraft !== (canvasAppending ? "" : canvasSource)
+
+  function editCanvas(append) {
+    if (!canvasOpen || !canvas || !canvasWritable) return
+    // Already writing: this is somebody pressing e a second time, and the
+    // answer to that is not to throw away what they have typed.
+    if (canvasEditing) return
+    // Replacing is only offered where all of the document came back and all of
+    // it can go back; everything else adds to the end.
+    var adding = append === true || !canvasReplaceable
+    canvasAppending = adding
+    canvasDraft = adding ? "" : canvasSource
+    canvasSaveError = ""
+    canvasEditing = true
+  }
+
+  function forgetCanvasEdit() {
+    canvasEditing = false
+    canvasAppending = false
+    canvasDraft = ""
+    canvasSaveError = ""
+  }
+
+  function saveCanvas() {
+    if (canvasSaving || !canvasEditing || !openConversation || pluginDir === "") return
+    if (canvasFileId === "") return
+    if (canvasDraft.trim() === "") {
+      canvasSaveError = "There is nothing to save"
+      return
+    }
+    if (!canvasWritable) {
+      canvasSaveError = "This token cannot write canvases"
+      return
+    }
+    canvasSaving = true
+    canvasSaveError = ""
+    var command = ["python3", helper(), "canvas-edit", "--account", alias,
+                   "--channel", String(openConversation.id), "--file", canvasFileId,
+                   "--operation", canvasAppending ? "insert_at_end" : "replace", "--stdin"]
+    if (demo) command.push("--demo")
+    canvasSaveProc.command = command
+    canvasSaveProc.running = true
+  }
+
+  Process {
+    id: canvasSaveProc
+    running: false
+    // The document goes in over stdin, the way a message does: it is the
+    // user's own writing and argv is readable by anyone on this machine.
+    stdinEnabled: true
+    stdout: StdioCollector { id: canvasSaveOut; waitForEnd: true }
+    stderr: StdioCollector { id: canvasSaveErr; waitForEnd: true }
+    onStarted: canvasSaveProc.write(JSON.stringify({
+      markdown: root.canvasDraft,
+      // What the window was given, handed straight back. A replace whose base
+      // is not Slack's current version is refused there, not here.
+      base: root.canvasAppending ? "" : (root.canvas ? String(root.canvas.digest || "") : "")
+    }) + "\n")
+    onExited: function(exitCode) {
+      root.canvasSaving = false
+      var parsed = Model.parseJson(canvasSaveOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.canvasSaveError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(canvasSaveErr.text || "Could not save this canvas", 200)
+        // What was typed stays in the box. A failed save that also threw the
+        // writing away would be the worst of both.
+        return
+      }
+      root.forgetCanvasEdit()
+      // Slack's copy is the one to show now - it puts the title back on top of
+      // a replace, and an append lands wherever it lands.
+      root.loadCanvas()
     }
   }
 

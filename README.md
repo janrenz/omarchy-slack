@@ -37,6 +37,13 @@ of their own.
 - **Mentions, channel links, emoji, pictures and files**, all resolved:
   `<@U024BE7LH>` becomes a name, `:tada:` becomes 🎉, an image is drawn inline,
   anything else is a chip that opens where the file already lives.
+- **The channel's canvas, read and written.** The charter, the runbook, who is
+  on call — `c` opens it in the transcript's own space, with no message box
+  under it, because a document is not a conversation. `e` writes in it: the
+  canvas as Markdown, the page it will make beside what you type, and buttons
+  for the markers. **Add to the end** is the way in that never touches what is
+  already there, and a canvas this window could not rewrite faithfully is only
+  offered that one.
 - **Keyboard first.** The whole window drives from the keyboard — see below, or
   press `?` in the window.
 
@@ -45,6 +52,8 @@ of their own.
 ![A thread, in a view of its own](showcase-thread.png)
 
 ![Jump to anything](showcase-jump.png)
+
+![A channel's canvas, being written: the Markdown on top, the page it makes underneath](showcase-canvas.png)
 
 Python 3 standard library only. It talks to the Slack Web API and nothing else.
 No token ever reaches the QML: `src/slack.py` holds it, and the shell reads
@@ -130,6 +139,7 @@ uses, is an app you install into your own workspace and a token it shows you.
          - files:write
          - search:read
          - stars:read
+         - canvases:write
    settings:
      org_deploy_enabled: false
      socket_mode_enabled: false
@@ -195,11 +205,14 @@ scope would enable the rest, rather than showing a button that fails.
 | `files:write` | sending a file | no **Attach** button, and a file dropped on the window is turned away with a line saying this scope is why |
 | `search:read` | searching every message — **and every preview and unread mark in the sidebar**, see below | the sidebar is names only |
 | `stars:read` | which conversations you starred in Slack, so your favourites lead each section of the sidebar | the sidebar orders by recency or name alone |
+| `canvases:write` | writing in a channel's canvas | the canvas can be read here and not written, and the pane says so |
 
 Adding a scope later means editing the app, reinstalling it, and pasting the
 new token. The plugin notices the moment it has it. That includes `files:write`,
-which an app installed before this plugin could send files will not have, and
-`stars:read`, which one installed before it respected your favourites will not.
+which an app installed before this plugin could send files will not have,
+`stars:read`, which one installed before it respected your favourites will not,
+and `canvases:write`, which one installed before it could write in a canvas
+will not.
 
 ## Sending a file
 
@@ -224,6 +237,40 @@ The upload is three steps and only the last one shares anything: Slack reserves
 an id and a URL, the bytes go to that URL, and a third call puts the file in the
 conversation. If that third call fails the file exists and nobody can see it,
 and the plugin says exactly that rather than calling it a failure.
+
+## The channel's canvas
+
+The document a channel keeps — the charter, the runbook, who is on call this
+week — opens in the transcript's own space from the **Canvas** button in the
+header, or `c`. There is no message box under it: a canvas is a document, not a
+conversation, and a box saying "Message" answers nothing that is written in
+one. What is under it instead is the way to write in the document itself.
+
+**Edit** (or `e`) opens the canvas as Markdown, with the page it will make
+beside what you are typing — under it, where the window is narrow. The buttons
+along the top put the markers in for you, and `Ctrl+B`, `Ctrl+I` and `Ctrl+K`
+do the same from the keyboard. `Shift+Enter` saves, `Escape` hands the keyboard
+back without losing what you have written, and **Cancel** is the one thing that
+throws a draft away. The title is not in the box: Slack keeps a canvas's title
+of its own and puts it back above whatever is saved.
+
+**Add to the end** is the other way in, and it is the one that is always
+offered: it writes something new at the bottom and leaves the rest alone.
+
+A save replaces the whole document, so a canvas is only offered **Edit** when
+all of it came back and all of it can go back again. A canvas with a picture,
+an embed or anything else this window reads as text but could not write as
+text keeps the **Add to the end** box and says why — replacing it here would
+quietly drop what it could not carry. The same goes for one longer than this
+window reads.
+
+And the copy being saved has to be the copy that was opened. A canvas is a
+document several people have open at once, so the helper checks Slack's
+version against the one the window was given and refuses a save that would
+undo somebody else's paragraph. Reload, make the change again, save.
+
+Canvases attached to a *message* rather than to the channel are still Slack's
+job, and so is anything that needs Slack's own editor.
 
 ## Keyboard
 
@@ -271,6 +318,7 @@ focus".
 | `m` | Mark this conversation read |
 | `r` | Reload this conversation |
 | `c` | Read this channel's canvas, and go back again |
+| `e` | In a canvas: write in it |
 | `,` | Settings |
 | `?` | This list |
 
@@ -535,11 +583,12 @@ have already read comes back.
   one window.
 - **Muted channels are not muted.** Slack keeps mutes in a preference the Web
   API does not publish, so a muted channel is an ordinary channel here.
-- **A canvas can be read, not written.** The document a channel keeps is
-  fetched, converted to text and shown in the transcript's own space by the
-  **Canvas** button in the header (or `c`), where it can be selected and its
-  links followed. Editing one, and canvases attached to a *message* rather than
-  to the channel, are still Slack's job.
+- **A canvas is written whole or not at all.** The document a channel keeps
+  can be read and written here — see above — but a save replaces all of it,
+  because reading one reads all of it. So a canvas holding a picture or an
+  embed is offered the box that adds to the end and not the one that rewrites,
+  and canvases attached to a *message* rather than to the channel are still
+  Slack's job.
 - **No huddles, calls, workflows, or editing what you sent.**
 - **A workspace's own emoji stay as their names.** `:blob-wave:` is a picture
   that lives in that workspace and there is no character for it, so the name is
@@ -603,6 +652,44 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.5.0 — 2026-09-02
+
+- **The canvas pane has no message box, and does have an editor.** A canvas is
+  a document, and the box saying "Message" under one answered nothing that was
+  written in it — so the document now has the whole pane, and what sits under
+  it is the way to write in the document itself. **Edit** opens the canvas as
+  Markdown with the page it will make beside what you are typing (under it,
+  where the window is narrow), buttons and `Ctrl+B` / `Ctrl+I` / `Ctrl+K` for
+  the markers, and `Shift+Enter` to save. **Add to the end** is the other way
+  in, and it never touches what is already there. `e` opens the editor, `c`
+  still opens and closes the pane.
+- **A canvas is rewritten whole or not at all, so it is only offered where all
+  of it survives the round trip.** Reading one reads all of it, and
+  `canvases.edit` replaces all of it, which makes a converter that quietly
+  dropped somebody's screenshot a way to lose work rather than a rough edge. A
+  canvas holding a picture, an embed or anything else the window reads as text
+  but cannot write as text keeps the **Add to the end** box and says why, and
+  so does one longer than the window reads. The markup is read a second way
+  for this — headings, lists, tables, code, checklists and links come back as
+  Markdown rather than as the flat prose the reading pane draws.
+- **A save cannot undo somebody else's.** A canvas is a document several
+  people have open at once. The helper is handed back the digest it sent with
+  the document, reads Slack's current version before writing, and refuses a
+  save whose base is no longer what Slack has — so the answer to a colleague
+  editing the same paragraph is a refusal and a reload, not a silent
+  overwrite.
+- **New scope, `canvases:write`.** An app installed before today does not have
+  it: the pane says the token cannot write canvases and how to fix it rather
+  than offering a Save that would 403. Reading a canvas still needs nothing
+  new.
+- **Nothing a canvas contains is fetched or drawn as markup, in the editor
+  either.** The page beside the box is the one place in this window where a
+  document chooses its own formatting, so what it may choose is settled first:
+  no pictures — an `![](https://evil/)` is the remote fetch the plugin exists
+  not to make — and no tags, in a preview or in a save. Slack's own mention
+  syntax points at a user id rather than at a host, so that one is kept and
+  drawn as the person's name.
 
 ### 0.4.2 — 2026-09-02
 

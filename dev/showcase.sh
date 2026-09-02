@@ -47,6 +47,16 @@ sleep 1.2
 shot "$OUT/showcase-jump.png"
 ipc pane none
 
+# The channel's canvas, being written rather than read: the pane has no
+# message box, and the page keeps up with the source.
+ipc canvas
+sleep 1.5
+ipc canvasEdit false
+sleep 0.8
+shot "$OUT/showcase-canvas.png"
+ipc canvasEdit false >/dev/null 2>&1 || true
+ipc canvas
+
 # The keyboard, since that is the argument for having this at all.
 ipc pane help
 sleep 0.8

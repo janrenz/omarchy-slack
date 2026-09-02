@@ -23,7 +23,9 @@ src/Model.js           Pure JS: shaping, grouping, labels, link building. No Qt
 src/Service.qml        Owns the Processes that run slack.py, the poll timer,
                        and the state the UI binds to.
 src/BarWidget.qml      The bar icon. Opens the window; there is no dropdown.
-src/SlackWindow.qml    The window. Sidebar, transcript, message box. ~2k lines.
+src/SlackWindow.qml    The window. Sidebar, transcript, message box, and the
+                       canvas pane - which has no message box, and has the
+                       Markdown editor instead. ~2k lines.
                        Also the file chooser and the window-wide DropArea, which
                        both end at sendFile() - the one place a file:// URL
                        becomes a path.
@@ -63,6 +65,14 @@ Nothing goes back the other way except a command line and a stdin payload.
    itself, from an offset into that text. `http`, `https`, `mailto` only —
    checked in `slack.py`, again in `Model.js` where the anchor is written, and
    once more in `openUrl` before `xdg-open` sees it. Keep all three.
+
+   The canvas editor's page pane is the one exception, and it is fenced the
+   same way: `canvas_markdown` escapes every character that would be markup on
+   the way out and never writes a picture, `Model.previewMarkdown` takes out
+   any picture and any tag that is there anyway before a renderer sees the
+   string, and a link still goes through `openUrl`. Three checkpoints again.
+   Rendering a canvas *anywhere else* means adding a fourth, not skipping
+   these.
 4. **Stdlib only.** No pip, nothing vendored. `python3 src/slack.py` must run on
    a stock Arch box.
 5. **Every helper command prints one JSON object** and exits 0 even on failure —
@@ -214,6 +224,18 @@ fatal QML error makes it exit instead.
   reads it back; by construction it can only clear a mark, never invent one. If
   you add a way to see a thread, mark it read there too, or the chip will keep
   saying "new" about something the user just read.
+- **A canvas is saved whole, which is why so little of this is optional.**
+  `canvases.edit` takes one change per call - two in the array is a refusal -
+  and a `replace` with no `section_id` is the whole document. Nothing the
+  window drew remembers which section it came from, so whole is the only
+  shape it can offer. Everything careful around it follows: the digest the
+  helper sends with the Markdown comes back with the save and is checked
+  against Slack's current version first, and a canvas whose Markdown came back
+  short (too long to read) or lossy (a picture, an embed) is never offered the
+  replacing editor at all. Slack also keeps the canvas title as a heading of
+  its own and puts it back on every full replace, so `drop_markdown_title`
+  takes it out of what is sent - without that a canvas gains a copy of its own
+  name with every save.
 - **Sending a file is three requests, and only the third shares it.**
   `files.getUploadURLExternal` reserves an id and a URL, the bytes go to that
   URL as `multipart/form-data` with one part named `file` (which is what Slack's

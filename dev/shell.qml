@@ -165,6 +165,28 @@ ShellRoot {
 
 
 
+    // Writing in that canvas rather than reading it: the editor, and what it
+    // would save. `save` goes through the helper in demo mode, which answers
+    // as though it had written and writes nothing.
+    function canvasEdit(append: bool): string {
+      panel.slackService.editCanvas(append)
+      return JSON.stringify({ editing: panel.slackService.canvasEditing,
+                              appending: panel.slackService.canvasAppending,
+                              writable: panel.slackService.canvasWritable,
+                              replaceable: panel.slackService.canvasReplaceable,
+                              note: panel.slackService.canvasNote,
+                              draft: panel.slackService.canvasDraft })
+    }
+
+    function canvasType(text: string): void {
+      panel.slackService.canvasDraft = text
+    }
+
+    function canvasSave(): string {
+      panel.slackService.saveCanvas()
+      return JSON.stringify({ saving: panel.slackService.canvasSaving })
+    }
+
     // The coding-agent handover, without an agent starting: the argv the window
     // would run, so a script can check what it points at and that the setting
     // actually turns it off.
