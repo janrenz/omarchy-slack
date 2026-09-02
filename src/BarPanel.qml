@@ -86,13 +86,43 @@ Panel {
                         kind: String(row.channelKind || "") })
   }
 
+  // Whether there is anything to mark, and whether this token may. A workspace
+  // signed in without the scope cannot - see canMarkRead - and an offer that
+  // would fail is worse than no offer.
+  readonly property bool canMarkAll: !!service && service.canMarkRead
+                                     && service.unreadCount > 0
+
+  // "Mark all as read", asked for but not yet done.
+  //
+  // Slack has no route back to unread, so this is the one thing in the panel
+  // that cannot be undone - and in a popup whose other keys are one keystroke
+  // each, that is too easy to do by accident. So it is asked twice: the hint
+  // line says how many and what will happen, and `m` again does it. Anything
+  // else at all backs out, and Escape backs out of this before it backs out of
+  // the panel.
+  property bool armingMarkAll: false
+
+  function markAll() {
+    if (!canMarkAll) { armingMarkAll = false; return }
+    if (!armingMarkAll) { armingMarkAll = true; return }
+    armingMarkAll = false
+    service.markAllRead()
+  }
+
   function open() {
+    // Every opening starts on what is waiting, an armed question included:
+    // coming back to a panel still holding a question from last time is how
+    // the answer gets given by accident.
+    armingMarkAll = false
     list.cursorIndex = -1
     root.controller.show()
     if (service) service.refresh()
   }
 
-  function close() { root.controller.hide() }
+  function close() {
+    armingMarkAll = false
+    root.controller.hide()
+  }
 
   function toggle() { root.opened ? root.close() : root.open() }
 
@@ -123,11 +153,24 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onMoveRequested: function(dx, dy) { if (dy !== 0) list.moveCursor(dy) }
-      onActivateRequested: list.activateCursor()
-      onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) {
+        root.armingMarkAll = false
+        if (dy !== 0) list.moveCursor(dy)
+      }
+      onActivateRequested: {
+        root.armingMarkAll = false
+        list.activateCursor()
+      }
+      onCloseRequested: {
+        // One layer at a time: the question you were asked, then the panel.
+        if (root.armingMarkAll) root.armingMarkAll = false
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
+        if (text === "m") { root.markAll(); return }
+        // Any other key is an answer of "no" to a question that was asked.
+        root.armingMarkAll = false
         if (text === "r" && root.service) root.service.refresh()
         else if (text === "o") root.openWindow({})
       }
@@ -196,6 +239,19 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.sm
+
+            PanelActionButton {
+              iconText: "\u{F012C}"   // nf-md-check_all
+              // Only while there is something to mark and a token that may.
+              visible: root.canMarkAll
+              tooltipText: root.armingMarkAll
+                ? "Mark " + root.service.unreadCount + " read — again to confirm"
+                : "Mark all as read  ·  m"
+              // Armed, it is the one thing here that changes anything, and it
+              // says so in the colour the panel uses for that.
+              foreground: root.armingMarkAll ? root.accent : root.fg
+              onClicked: root.markAll()
+            }
 
             PanelActionButton {
               iconText: "\u{F03CC}"   // nf-md-open_in_new
@@ -293,10 +349,19 @@ Panel {
 
         Text {
           width: parent.width
-          text: "o window  ·  r refresh"
+          text: {
+            if (root.armingMarkAll && root.service)
+              return "Mark " + root.service.unreadCount + " read?  m confirms  ·  Esc cancels"
+            if (root.service && root.service.markingRead) return "Marking read…"
+            var keys = ["o window", "r refresh"]
+            // "m read all" rather than "m mark all read": a third key is what
+            // this line has room for, and not a word more.
+            if (root.canMarkAll) keys.splice(0, 0, "m read all")
+            return keys.join("  ·  ")
+          }
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          color: Qt.darker(root.fg, 1.8)
+          color: root.armingMarkAll ? root.accent : Qt.darker(root.fg, 1.8)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }

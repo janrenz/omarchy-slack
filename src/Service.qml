@@ -840,13 +840,53 @@ Item {
 
   property string markReadError: ""
 
+  // Marks still to make. `conversations.mark` names one channel, so marking
+  // everything is a queue rather than a request - and the single-conversation
+  // mark goes through the same queue, because the guard that used to drop a
+  // mark asked for while one was in flight would have dropped every one of
+  // these but the first.
+  property var markQueue: []
+
   function markRead(ts) {
+    if (!openConversation) return
+    enqueueMark(String(openConversation.id), ts)
+  }
+
+  function enqueueMark(id, ts) {
+    var channel = String(id || "")
     var stamp = String(ts || "")
-    if (!openConversation || stamp === "" || markReadProc.running || pluginDir === "") return
+    if (channel === "" || stamp === "" || pluginDir === "") return
     if (demo) return
     if (!canMarkRead) return
+    // Already going to be marked. A second entry would be a second request
+    // saying the same thing, and the newest ts is the one already queued.
+    for (var i = 0; i < markQueue.length; i++)
+      if (String(markQueue[i].id) === channel) return
+    markQueue = markQueue.concat([{ id: channel, ts: stamp }])
+    pumpMarkRead()
+  }
+
+  // Everything with something waiting in it, in one go.
+  //
+  // Each conversation is marked up to its own row's ts rather than to anything
+  // on screen: the row's ts comes from the search feed, which sees thread
+  // replies, and a thread reply is exactly what leaves a conversation unread
+  // with nothing in its transcript left to read - see newestKnownTs. A row
+  // with no ts at all is one nothing has been said in, and there is nothing
+  // to mark.
+  function markAllRead() {
+    if (!canMarkRead || pluginDir === "" || demo) return
+    var rows = conversations || []
+    for (var i = 0; i < rows.length; i++)
+      if (rows[i].unread === true)
+        enqueueMark(String(rows[i].id || ""), String(rows[i].ts || ""))
+  }
+
+  function pumpMarkRead() {
+    if (markReadProc.running || markQueue.length === 0) return
     markReadProc.command = ["python3", helper(), "mark-read", "--account", alias,
-                            "--channel", String(openConversation.id), "--ts", stamp]
+                            "--channel", String(markQueue[0].id),
+                            "--ts", String(markQueue[0].ts)]
     markReadProc.running = true
   }
 
@@ -899,7 +939,10 @@ Item {
     markRead(newestKnownTs())
   }
 
-  readonly property bool markingRead: markReadProc.running
+  // A mark in flight, or waiting to be. The queue counts: the button that
+  // hangs on this must not come back to life between the marks of one
+  // "mark all as read".
+  readonly property bool markingRead: markReadProc.running || markQueue.length > 0
 
   Process {
     id: markReadProc
@@ -910,11 +953,19 @@ Item {
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
         root.markReadError = parsed && parsed.error
           ? String(parsed.error.message) : "Could not mark this conversation read"
+        // The rest go with it. Whatever refused this one - a token that may
+        // not mark, or Slack saying no - will refuse the next twenty the same
+        // way, and twenty requests to be told so is not worth the one message
+        // it produces.
+        root.markQueue = []
         return
       }
       root.markReadError = ""
+      root.markQueue = root.markQueue.slice(1)
+      if (root.markQueue.length > 0) { root.pumpMarkRead(); return }
       // The mark lives in the conversation list, which this has just changed
-      // on the server; re-read it so the list agrees with what was done.
+      // on the server; re-read it so the list agrees with what was done. Once,
+      // after the last of them, rather than once per conversation.
       root.refresh()
     }
   }

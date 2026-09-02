@@ -305,8 +305,17 @@ one rung at a time, and `j`/`k` always mean "down and up in whatever has
 focus".
 
 The dropdown behind the bar icon has its own handful, because it holds its own
-one thing: `o` opens the window, `r` refreshes, `j`/`k` and `Enter` walk what is
-waiting, and `Escape` closes it.
+one thing: `o` opens the window, `r` refreshes, `m` marks everything read,
+`j`/`k` and `Enter` walk what is waiting, and `Escape` closes it.
+
+`m` is asked twice. Slack has no route back to unread, so it is the one thing in
+the dropdown that cannot be undone, and in a popup where every other key is a
+single keystroke that is too easy to do by accident. The first `m` turns the
+line at the bottom into *Mark 4 read?*, a second does it, and any other key at
+all backs out — `Escape` backs out of the question before it closes the panel.
+The button beside the icons does the same thing and says the same thing in its
+tooltip. Neither appears at all unless something is unread and the token may
+mark it: an offer that would fail is worse than no offer.
 
 ### Moving
 
@@ -706,6 +715,23 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.8.0 — 2026-09-02
+
+- **Mark everything read from the dropdown.** The bar's whole question is
+  whether anything needs you, and the answer was sometimes "no, that was
+  yesterday's" — which took opening each conversation to say. `m` in the
+  dropdown, or the button beside the icons, marks every unread conversation
+  read; it is asked twice, because Slack has no route back to unread. Each
+  conversation is marked up to its own row's newest timestamp, which comes from
+  the search feed and so accounts for thread replies — the replies that leave a
+  conversation lit with nothing in its transcript left to read.
+- **A mark asked for while one was in flight is no longer dropped.** Slack marks
+  one channel at a time, and the guard that stopped two racing did it by
+  throwing the second away. Marks queue now, one request at a time, with the
+  conversation list re-read once at the end rather than after each. A refusal
+  empties the queue rather than sending twenty more requests to be refused the
+  same way.
 
 ### 0.7.0 — 2026-09-02
 
