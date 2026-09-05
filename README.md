@@ -761,6 +761,21 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.9.3 — 2026-09-05
+
+- **The browser tab no longer congratulates you on a sign-in that failed.**
+  The success page went out the moment the authorization code arrived, before
+  the token was asked for — so an exchange Slack refused still said "Signed
+  in" in the one place anybody was looking, while the window stayed signed
+  out. The exchange now happens while the browser is still waiting on the
+  connection, and the page says which of the two actually happened.
+
+- **An app without PKCE says which switch to press.** Slack refuses that case
+  with `bad_client_secret`, which sounds like a missing secret and is really
+  "this app is not marked a public client". It is the first-run mistake, so it
+  now names the setting: OAuth & Permissions → Advanced token security via
+  PKCE.
+
 ### 0.9.2 — 2026-09-05
 
 - **The window's own sign-in card offers the browser sign-in too.** 0.9.0 put

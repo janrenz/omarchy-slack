@@ -452,6 +452,11 @@ PLAIN_ENGLISH = {
     # The browser sign-in. Slack's own words for these are the OAuth spec's,
     # which describe a protocol rather than what the person in front of the
     # screen should do about it.
+    # The first-run mistake, and it does not sound like what it is: Slack asks
+    # for a client secret when the app has not been marked a public client, so
+    # the code_verifier this flow sends instead is not what it was expecting.
+    "bad_client_secret": "That Slack app is not set up for this kind of sign-in yet. On its OAuth & Permissions page, turn on Advanced token security via PKCE, then try again.",
+    "invalid_client": "That Slack app is not set up for this kind of sign-in yet. On its OAuth & Permissions page, turn on Advanced token security via PKCE, then try again.",
     "invalid_code": "That sign-in expired before it finished. Start it again.",
     "code_already_used": "That sign-in was already completed. Start a new one.",
     "invalid_grant": "Slack would not renew this sign-in. Sign in again.",
@@ -4005,8 +4010,16 @@ def answer(conn, status, message):
         pass
 
 
-def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT):
-    """The authorization code the browser brings back, or an AccountError.
+def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT, finish=None):
+    """What the browser brings back, traded for a token before it is answered.
+
+    `finish` is the trade. It runs while the browser is still waiting on this
+    connection, so that the page somebody is looking at says what actually
+    happened rather than what was about to be attempted: the tab is the only
+    place a person is looking at this point, and a tab that says "Signed in"
+    over a failed exchange is worse than no page at all. It was exactly that
+    for a while - the success page went out the moment the code arrived, and a
+    sign-in Slack refused still congratulated you.
 
     Bound to 127.0.0.1 rather than to every interface, so what is listening
     here is reachable from this machine and from nowhere else - this is a
@@ -4068,8 +4081,18 @@ def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT):
                 if not code:
                     answer(conn, "400 Bad Request", "Slack sent no authorization code.")
                     continue
-                answer(conn, "200 OK", "Signed in. You can close this tab and go back to Omarchy.")
-                return code
+                if finish is None:
+                    answer(conn, "200 OK",
+                           "Signed in. You can close this tab and go back to Omarchy.")
+                    return code
+                try:
+                    finished = finish(code)
+                except AccountError as error:
+                    answer(conn, "200 OK", "Sign-in failed. " + error.message)
+                    raise
+                answer(conn, "200 OK",
+                       "Signed in. You can close this tab and go back to Omarchy.")
+                return finished
     finally:
         server.close()
 
@@ -4119,14 +4142,18 @@ def cmd_login_wait(args):
     if not pending.get("verifier"):
         fail("no_sign_in", "No sign-in is waiting. Start one first.")
     port = int(pending.get("port") or 0)
-    try:
-        code = wait_for_redirect(port, str(pending.get("state") or ""), args.timeout)
-        payload = oauth_call({
+
+    def trade(code):
+        return oauth_call({
             "client_id": str(pending.get("clientId") or ""),
             "code": code,
             "code_verifier": str(pending.get("verifier") or ""),
             "redirect_uri": redirect_uri(port),
         })
+
+    try:
+        payload = wait_for_redirect(
+            port, str(pending.get("state") or ""), args.timeout, finish=trade)
     except AccountError as error:
         forget_pending(args.account)
         fail(error.code, error.message)

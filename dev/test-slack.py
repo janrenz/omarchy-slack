@@ -2353,6 +2353,44 @@ class BrowserSignIn(unittest.TestCase):
         self.visit(port, slack.REDIRECT_PATH + "?code=ours&state=thestate", delay=0.3)
         self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "ours")
 
+    def test_the_tab_is_told_the_exchange_failed_rather_than_congratulated(self):
+        """The tab is the only place anybody is looking when this goes wrong.
+
+        The success page used to go out the moment the code arrived, before
+        the token exchange had been tried - so a sign-in Slack refused still
+        said "Signed in" in the browser while the window stayed signed out.
+        """
+        port = slack.free_port()
+        seen = []
+
+        def go():
+            time.sleep(0.05)
+            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                conn.sendall(("GET %s?code=c&state=s HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                              % slack.REDIRECT_PATH).encode())
+                seen.append(conn.recv(4096).decode("utf-8", "replace"))
+            finally:
+                conn.close()
+        thread = threading.Thread(target=go, daemon=True)
+        thread.start()
+
+        def refuse(code):
+            raise slack.AccountError("exchange_failed", "Slack would not have it.")
+
+        with self.assertRaises(slack.AccountError):
+            slack.wait_for_redirect(port, "s", timeout=5, finish=refuse)
+        thread.join(timeout=5)
+        self.assertIn("Slack would not have it.", seen[0])
+        self.assertNotIn("Signed in", seen[0])
+
+    def test_what_the_exchange_returned_is_what_comes_back(self):
+        port = slack.free_port()
+        self.visit(port, slack.REDIRECT_PATH + "?code=thecode&state=s")
+        got = slack.wait_for_redirect(port, "s", timeout=5,
+                                      finish=lambda code: {"traded": code})
+        self.assertEqual(got, {"traded": "thecode"})
+
     def test_a_refusal_in_the_browser_comes_back_as_one(self):
         port = slack.free_port()
         self.visit(port, slack.REDIRECT_PATH + "?error=access_denied&state=thestate")
@@ -2482,10 +2520,21 @@ class RotatingTokens(unittest.TestCase):
     def test_the_oauth_refusals_are_answered_in_words_not_in_spec_terms(self):
         """What Slack says here is the OAuth spec's vocabulary, not a person's."""
         for code in ("invalid_code", "code_already_used", "bad_redirect_uri",
-                     "invalid_code_verifier", "invalid_grant"):
+                     "invalid_code_verifier", "invalid_grant", "bad_client_secret"):
             said = slack.friendly(code)
             self.assertNotIn("Slack said", said, code)
             self.assertTrue(said.endswith("."), code)
+
+    def test_the_app_without_pkce_is_told_which_switch_to_press(self):
+        """`bad_client_secret` is the first-run mistake and does not sound like it.
+
+        Slack asks for a client secret when the app has not been marked a
+        public client, so what it is really saying is that PKCE is off - which
+        is a switch on a page, not a secret to go and find.
+        """
+        said = slack.friendly("bad_client_secret")
+        self.assertIn("PKCE", said)
+        self.assertNotIn("secret", said.lower())
 
     def test_a_rotating_token_is_refused_when_pasted_and_taken_when_renewable(self):
         self.assertIn("rotates", slack.token_problem("xoxe.xoxp-1", "im:history"))
