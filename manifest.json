@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "janrenz.omarchy.slack",
   "name": "Slack",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "author": "Jan Renz",
   "license": "MIT",
   "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Sign in through your browser - no Slack app of your own to create, nothing to paste. Needs python3 (standard library only). Talks to the Slack Web API and nothing else.",

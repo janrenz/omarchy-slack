@@ -1314,9 +1314,47 @@ Item {
 
               Text {
                 width: parent.width
-                text: "Slack needs an app of your own. On api.slack.com/apps: create one from "
-                      + "the manifest in this plugin's README, install it to your workspace, "
-                      + "and copy the User OAuth Token it shows you - the one starting xoxp."
+                text: "Sign in through your browser: Slack asks which workspace and what this "
+                      + "may do, and hands the answer back to this machine."
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Qt.darker(Color.foreground, 1.4)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              Row {
+                spacing: Style.spacing.sm
+
+                Button {
+                  enabled: !service.signingIn
+                  text: service.browserSignIn ? "Waiting for Slack…" : "Sign in with Slack"
+                  bordered: true
+                  foreground: Color.accent
+                  fontFamily: Style.font.family
+                  fontSize: Style.font.caption
+                  onClicked: service.signInWithBrowser()
+                }
+
+                Button {
+                  visible: service.browserSignIn
+                  text: "Cancel"
+                  bordered: true
+                  foreground: Color.foreground
+                  fontFamily: Style.font.family
+                  fontSize: Style.font.caption
+                  onClicked: service.cancelBrowserSignIn()
+                }
+              }
+
+              // The old way in, kept because a workspace that refuses the
+              // browser flow still has it, and because a token pasted here is
+              // what every sign-in before 0.9.0 was.
+              Text {
+                width: parent.width
+                text: "Or paste a token: create an app on api.slack.com/apps from the manifest "
+                      + "in this plugin's README, install it to your workspace, and copy the "
+                      + "User OAuth Token it shows you - the one starting xoxp."
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 color: Qt.darker(Color.foreground, 1.4)

@@ -761,6 +761,15 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.9.2 — 2026-09-05
+
+- **The window's own sign-in card offers the browser sign-in too.** 0.9.0 put
+  the button in settings and left the card asking for a token, which is the
+  one screen somebody who is not signed in actually sees — so the new way in
+  was behind the gear, on a pane you had to know was there. Pasting a token is
+  still on the card, under an "or", because a workspace that refuses the
+  browser flow still needs it.
+
 ### 0.9.1 — 2026-09-05
 
 - **What Slack refuses a sign-in with, in words.** Slack answers this flow in
