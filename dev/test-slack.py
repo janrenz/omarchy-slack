@@ -2479,6 +2479,14 @@ class RotatingTokens(unittest.TestCase):
         finally:
             slack.oauth_call = original
 
+    def test_the_oauth_refusals_are_answered_in_words_not_in_spec_terms(self):
+        """What Slack says here is the OAuth spec's vocabulary, not a person's."""
+        for code in ("invalid_code", "code_already_used", "bad_redirect_uri",
+                     "invalid_code_verifier", "invalid_grant"):
+            said = slack.friendly(code)
+            self.assertNotIn("Slack said", said, code)
+            self.assertTrue(said.endswith("."), code)
+
     def test_a_rotating_token_is_refused_when_pasted_and_taken_when_renewable(self):
         self.assertIn("rotates", slack.token_problem("xoxe.xoxp-1", "im:history"))
         self.assertEqual(slack.token_problem("xoxe.xoxp-1", "im:history", renewable=True), "")

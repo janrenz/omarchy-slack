@@ -761,6 +761,14 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.9.1 — 2026-09-05
+
+- **What Slack refuses a sign-in with, in words.** Slack answers this flow in
+  the OAuth spec's vocabulary — `invalid_code`, `bad_redirect_uri`,
+  `invalid_code_verifier` — which describes a protocol rather than what the
+  person looking at the screen should do about it. Each one now says what
+  happened and what to press.
+
 ### 0.9.0 — 2026-09-05
 
 - **Sign in through the browser, with no app of your own.** Press **Sign in

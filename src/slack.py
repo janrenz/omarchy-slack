@@ -449,6 +449,17 @@ PLAIN_ENGLISH = {
     "cannot_dm_bot": "Slack will not open a DM with that app.",
     "restricted_action": "Your workspace does not allow that.",
     "fetch_members_failed": "Slack could not list who is in that conversation.",
+    # The browser sign-in. Slack's own words for these are the OAuth spec's,
+    # which describe a protocol rather than what the person in front of the
+    # screen should do about it.
+    "invalid_code": "That sign-in expired before it finished. Start it again.",
+    "code_already_used": "That sign-in was already completed. Start a new one.",
+    "invalid_grant": "Slack would not renew this sign-in. Sign in again.",
+    "bad_client_id": "That Slack app id is not one Slack knows.",
+    "invalid_client_id": "That Slack app id is not one Slack knows.",
+    "bad_redirect_uri": "Slack will not send a sign-in back to this machine: the app is missing the localhost redirect URL this plugin uses.",
+    "invalid_code_verifier": "That sign-in could not prove it was the one that started. Start it again.",
+    "invalid_scope": "The Slack app was not allowed to ask for one of the permissions this plugin needs.",
 }
 
 
