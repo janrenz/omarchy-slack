@@ -26,6 +26,8 @@ import html as html_entities
 import json
 import os
 import re
+import secrets
+import socket
 import stat
 import sys
 import threading
@@ -473,7 +475,10 @@ def load_account(alias):
     account = read_json(state_path(alias))
     if not account or not account.get("token"):
         raise AccountError("auth_required", "Not signed in")
-    return account
+    # The one place every command's token comes from, which is the only place
+    # a renewal can happen without each of them remembering to ask. A pasted
+    # token has nothing to renew and goes straight through.
+    return refreshed(alias, account)
 
 
 def granted(account, capability):
@@ -496,7 +501,7 @@ def missing_scopes(account):
     return [scope for scope in WANTED_SCOPES if scope not in have]
 
 
-def token_problem(token, scopes):
+def token_problem(token, scopes, renewable=False):
     """Why this token cannot be used for this, or "".
 
     Slack hands out four things that all look like tokens and only one of them
@@ -515,10 +520,15 @@ def token_problem(token, scopes):
                 "page, which exists to edit app manifests and can do nothing else. The one this "
                 "needs is on your own app's page under OAuth & Permissions, after the app is "
                 "installed to the workspace: User OAuth Token, starting xoxp-.")
-    if text.startswith("xoxe."):
-        return ("That token rotates, and this plugin cannot refresh it - it would stop working in "
-                "twelve hours. Turn token rotation off in your app's settings, reinstall the app, "
-                "and paste the User OAuth Token, which then starts xoxp-.")
+    if text.startswith("xoxe.") and not renewable:
+        # `renewable` is the browser sign-in saying it holds the refresh token
+        # that goes with this one. Pasted by hand there is no such thing, and a
+        # rotating token on its own does stop working in twelve hours - so the
+        # advice stands for the case it was written about, and only that one.
+        return ("That token rotates, and there is no refresh token here to renew it with - it "
+                "would stop working in twelve hours. Either sign in through the browser, which "
+                "keeps the refresh token, or turn token rotation off in your app's settings, "
+                "reinstall the app, and paste the User OAuth Token, which then starts xoxp-.")
     if text.startswith("xoxb-"):
         return ("That is the Bot User OAuth Token. This plugin reads the conversations you are in "
                 "and posts as you, so it wants the User OAuth Token above it on the same page, "
@@ -3737,6 +3747,32 @@ def read_stdin_json():
     return parsed if isinstance(parsed, dict) else {}
 
 
+def built_account(alias, api, identity, token, scopes):
+    """What `auth.test` said about a token, as the account file's shape.
+
+    Shared by the two ways in - a token pasted from an app's own page, and the
+    browser sign-in below - so that an account is the same object whichever
+    door it came through, and a field added for one is not missing from the
+    other.
+    """
+    account = {
+        "alias": alias,
+        "token": token,
+        "team": str(identity.get("team") or ""),
+        "teamId": str(identity.get("team_id") or ""),
+        "url": str(identity.get("url") or ""),
+        "userId": str(identity.get("user_id") or ""),
+        "userName": str(identity.get("user") or ""),
+        "displayName": "",
+        "bot": bool(identity.get("bot_id")),
+        "scopes": scopes,
+        "savedAt": time.time(),
+    }
+    users = resolve_users(api, alias, [account["userId"]])
+    account["displayName"] = display_name(users, account["userId"], account["userName"])
+    return account
+
+
 def cmd_login_set(args):
     token = str(read_stdin_json().get("token") or "").strip()
     if not token:
@@ -3760,21 +3796,7 @@ def cmd_login_set(args):
         # workspace it cannot read.
         fail("token_unusable", problem, scopes=api.scopes)
 
-    account = {
-        "alias": args.account,
-        "token": token,
-        "team": str(payload.get("team") or ""),
-        "teamId": str(payload.get("team_id") or ""),
-        "url": str(payload.get("url") or ""),
-        "userId": str(payload.get("user_id") or ""),
-        "userName": str(payload.get("user") or ""),
-        "displayName": "",
-        "bot": bool(payload.get("bot_id")),
-        "scopes": api.scopes,
-        "savedAt": time.time(),
-    }
-    users = resolve_users(api, args.account, [account["userId"]])
-    account["displayName"] = display_name(users, account["userId"], account["userName"])
+    account = built_account(args.account, api, payload, token, api.scopes)
     write_json(state_path(args.account), account, private=True)
 
     out({
@@ -3786,6 +3808,455 @@ def cmd_login_set(args):
         "scopes": account["scopes"],
         "missingScopes": missing_scopes(account),
     })
+
+
+# --------------------------------------------------------------------------
+# signing in without an app of your own
+#
+# For most of this plugin's life there was no such thing. Slack had no
+# device-code flow and would not redirect a browser to a desktop that has no
+# `https` address to be sent to, so the only way in was an app you made
+# yourself and a token you copied off its page - which is why this is the one
+# plugin in the set that cannot be installed and used, only installed and then
+# set up.
+#
+# Slack made PKCE generally available on 2026-03-30 and that stopped being
+# true. A public client - one with no secret to keep, which a plugin shipped
+# as source is - proves it started the sign-in it is finishing by holding a
+# random secret back until the end: the browser carries a SHA-256 of it, the
+# token exchange carries the secret itself, and an authorization code stolen
+# in between buys nothing without it. Slack's own rules for this flow line up
+# with what this plugin already is:
+#
+#   - `localhost` redirects count as desktop redirects for a PKCE app, so the
+#     browser can come back to a socket on this machine.
+#   - `oauth.v2.access` takes no `client_secret` at all. Not optional, absent.
+#   - Desktop redirects may not ask for bot scopes - and this plugin has never
+#     wanted one. It reads what you can read and posts as you, which is a user
+#     token, which is the only thing this flow can get.
+#
+# So the client id below is an identifier rather than a secret, and shipping
+# it in the open is the intended use. A workspace that would rather sign in
+# through an app of its own - for its admins' own audit trail, or because the
+# workspace does not allow this one - passes `--client-id` and everything else
+# here is unchanged.
+# --------------------------------------------------------------------------
+
+AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
+
+# The app this plugin signs in through when nobody names another. Empty until
+# the public app exists; `login-url` says so plainly rather than building a URL
+# that would fail at Slack with `invalid_client_id`.
+DEFAULT_CLIENT_ID = ""
+
+# Slack matches a redirect URL exactly, including the port, so the port cannot
+# be picked freshly at sign-in the way a loopback listener usually would. These
+# three are registered on the app and tried in order, which is enough for the
+# case that actually happens - something else on this machine already holds the
+# first one - without pretending to handle a machine where all three are taken.
+REDIRECT_PORTS = (45877, 45878, 45879)
+REDIRECT_PATH = "/omarchy-slack"
+
+# Long enough to find the browser window, read the permission list, and pick
+# the right workspace from the account switcher; short enough that a sign-in
+# nobody finished stops listening rather than holding a port until the shell
+# quits.
+SIGN_IN_TIMEOUT = 300
+
+# An access token from this flow lasts twelve hours and is renewed from a
+# refresh token that rotates with it. Renewed early, because a token that
+# expires between the check and the request is a failed poll.
+REFRESH_MARGIN = 300
+
+
+def redirect_uri(port):
+    return "http://localhost:%d%s" % (int(port), REDIRECT_PATH)
+
+
+def pending_path(alias):
+    problem = alias_problem(alias)
+    if problem:
+        raise AccountError("bad_alias", problem)
+    return os.path.join(STATE_DIR, alias + ".signin.json")
+
+
+def forget_pending(alias):
+    try:
+        os.remove(pending_path(alias))
+    except (OSError, AccountError):
+        pass
+
+
+def pkce_pair():
+    """A verifier to keep, and the challenge that goes to the browser.
+
+    64 random bytes rather than the 32 most examples use: the verifier is the
+    whole security of this flow - it is what proves the process finishing the
+    sign-in is the one that started it - and the only cost of more of it is
+    URL length. Base64url with the padding stripped, which is what the spec
+    asks for and what Slack checks against.
+    """
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode("ascii").rstrip("=")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+def free_port():
+    """The first registered port nothing else is holding, or 0."""
+    for port in REDIRECT_PORTS:
+        probe = socket.socket()
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            probe.close()
+    return 0
+
+
+def oauth_call(params):
+    """oauth.v2.access, with no token and no client secret.
+
+    Not a `Slack` method: every one of those sends `Authorization: Bearer`,
+    and this is the request made to find out what the token is. It goes
+    through the same guarded opener all the same, so a redirect off slack.com
+    is refused here as everywhere else - this is the request carrying the
+    authorization code, so it is the last one that should follow a stranger.
+    """
+    body = urllib.parse.urlencode({k: v for k, v in params.items() if v}).encode()
+    request = urllib.request.Request(
+        API + "/oauth.v2.access",
+        data=body,
+        method="POST",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with API_OPENER.open(request, timeout=30) as response:
+            payload = json.loads(read_capped(response) or b"{}")
+    except urllib.error.HTTPError as error:
+        raise AccountError("exchange_failed", "Slack answered %d to the sign-in" % error.code)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+        raise AccountError("unreachable", "Could not reach Slack: %s" % error)
+    if not isinstance(payload, dict):
+        raise AccountError("bad_response", "Slack sent something that was not an answer")
+    if payload.get("ok") is not True:
+        raise AccountError("exchange_failed", friendly(payload.get("error", "")))
+    return payload
+
+
+def read_request_target(conn, limit=8192):
+    """The path a browser asked for, off the request line and nothing more.
+
+    Only the first line is read, and only so much of it. Everything this needs
+    is in it, the sender is a browser on this machine rather than anybody who
+    should be trusted with an unbounded read, and a request that never sends a
+    newline is a hung sign-in rather than a wait forever.
+    """
+    seen = b""
+    while b"\r\n" not in seen and len(seen) < limit:
+        try:
+            block = conn.recv(1024)
+        except (TimeoutError, OSError):
+            return ""
+        if not block:
+            break
+        seen += block
+    line = seen.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+    parts = line.split(" ")
+    if len(parts) < 2 or parts[0] != "GET":
+        return ""
+    return parts[1]
+
+
+def answer(conn, status, message):
+    page = (
+        "<!doctype html><meta charset=utf-8>"
+        "<title>Omarchy Slack</title>"
+        "<body style='font:16px system-ui;margin:4rem auto;max-width:28rem'>"
+        "<p>%s</p></body>" % html_entities.escape(message)
+    ).encode("utf-8")
+    head = (
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n\r\n" % (status, len(page))
+    ).encode("ascii")
+    try:
+        conn.sendall(head + page)
+    except OSError:
+        pass
+
+
+def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT):
+    """The authorization code the browser brings back, or an AccountError.
+
+    Bound to 127.0.0.1 rather than to every interface, so what is listening
+    here is reachable from this machine and from nowhere else - this is a
+    socket that hands out an authorization code to whoever asks in the right
+    shape, and the shape is short.
+
+    It keeps accepting until the deadline rather than answering one connection
+    and stopping, because a browser sent to a page makes more requests than
+    the one: a favicon, a speculative preconnect, a second tab restored from
+    the last session. Answering the first of those and closing would end the
+    sign-in before the redirect ever arrived.
+
+    `state` is compared before the code is looked at, and compared in constant
+    time, because it is the check that says this redirect belongs to the
+    sign-in this process started rather than to one a page somewhere else
+    started on your behalf.
+    """
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(("127.0.0.1", int(port)))
+    except OSError:
+        raise AccountError(
+            "port_taken",
+            "Something else is using port %d on this machine, which is where Slack was told "
+            "to send you back. Close it and sign in again." % int(port))
+    server.listen(1)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AccountError("sign_in_timeout",
+                                   "Nobody came back from Slack, so the sign-in was given up.")
+            server.settimeout(remaining)
+            try:
+                conn, _ = server.accept()
+            except (TimeoutError, OSError):
+                raise AccountError("sign_in_timeout",
+                                   "Nobody came back from Slack, so the sign-in was given up.")
+            with conn:
+                conn.settimeout(10)
+                target = read_request_target(conn)
+                split = urllib.parse.urlsplit(target)
+                if split.path != REDIRECT_PATH:
+                    answer(conn, "404 Not Found", "Nothing here.")
+                    continue
+                query = urllib.parse.parse_qs(split.query)
+                refused = (query.get("error") or [""])[0]
+                if refused:
+                    answer(conn, "200 OK", "Sign-in cancelled. You can close this tab.")
+                    raise AccountError("denied", friendly(refused) if refused != "access_denied"
+                                       else "The sign-in was refused in the browser.")
+                came_back = (query.get("state") or [""])[0]
+                if not secrets.compare_digest(str(came_back), str(state)):
+                    answer(conn, "400 Bad Request", "That sign-in was not the one this window started.")
+                    continue
+                code = (query.get("code") or [""])[0]
+                if not code:
+                    answer(conn, "400 Bad Request", "Slack sent no authorization code.")
+                    continue
+                answer(conn, "200 OK", "Signed in. You can close this tab and go back to Omarchy.")
+                return code
+    finally:
+        server.close()
+
+
+def cmd_login_url(args):
+    """Start a sign-in: the URL to open, and the secret kept back from it."""
+    problem = alias_problem(args.account)
+    if problem:
+        fail("bad_alias", problem)
+    client_id = str(getattr(args, "client_id", "") or DEFAULT_CLIENT_ID).strip()
+    if not client_id:
+        fail("no_client_id",
+             "This copy of the plugin has no Slack app to sign in through. Give it the client id "
+             "of an app of your own, or paste a User OAuth Token instead.")
+    port = free_port()
+    if not port:
+        fail("no_port",
+             "Every port Slack is allowed to send you back to (%s) is in use on this machine."
+             % ", ".join(str(p) for p in REDIRECT_PORTS))
+
+    verifier, challenge = pkce_pair()
+    state = secrets.token_urlsafe(24)
+    write_json(pending_path(args.account), {
+        "clientId": client_id,
+        "verifier": verifier,
+        "state": state,
+        "port": port,
+        "startedAt": time.time(),
+    }, private=True)
+
+    url = AUTHORIZE_URL + "?" + urllib.parse.urlencode({
+        # user_scope alone, and no `scope`: a desktop redirect may not ask for
+        # bot scopes, and this plugin has never wanted one.
+        "user_scope": ",".join(WANTED_SCOPES),
+        "client_id": client_id,
+        "redirect_uri": redirect_uri(port),
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    out({"ok": True, "url": url, "port": port, "expiresIn": SIGN_IN_TIMEOUT})
+
+
+def cmd_login_wait(args):
+    """Hold the socket until the browser comes back, then trade the code."""
+    pending = read_json(pending_path(args.account)) or {}
+    if not pending.get("verifier"):
+        fail("no_sign_in", "No sign-in is waiting. Start one first.")
+    port = int(pending.get("port") or 0)
+    try:
+        code = wait_for_redirect(port, str(pending.get("state") or ""), args.timeout)
+        payload = oauth_call({
+            "client_id": str(pending.get("clientId") or ""),
+            "code": code,
+            "code_verifier": str(pending.get("verifier") or ""),
+            "redirect_uri": redirect_uri(port),
+        })
+    except AccountError as error:
+        forget_pending(args.account)
+        fail(error.code, error.message)
+    forget_pending(args.account)
+
+    authed = payload.get("authed_user") or {}
+    token = str(authed.get("access_token") or "")
+    if not token:
+        fail("no_token", "Slack finished the sign-in without giving a user token.")
+    refresh = str(authed.get("refresh_token") or "")
+    try:
+        expires_in = float(authed.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0.0
+
+    api = Slack(token)
+    ok, identity = api.call("auth.test")
+    if not ok:
+        fail("login_failed", friendly(identity.get("error", "")))
+    scopes = api.scopes or str(authed.get("scope") or "")
+    problem = token_problem(token, scopes, renewable=bool(refresh))
+    if problem:
+        fail("token_unusable", problem, scopes=scopes)
+
+    account = built_account(args.account, api, identity, token, scopes)
+    account["clientId"] = str(pending.get("clientId") or "")
+    account["refreshToken"] = refresh
+    account["expiresAt"] = (time.time() + expires_in) if expires_in else 0
+    write_json(state_path(args.account), account, private=True)
+    out({
+        "ok": True,
+        "team": account["team"],
+        "user": account["displayName"] or account["userName"],
+        "userId": account["userId"],
+        "bot": account["bot"],
+        "scopes": account["scopes"],
+        "missingScopes": missing_scopes(account),
+        "renews": bool(refresh),
+    })
+
+
+def refreshed(alias, account):
+    """This account with a token that has not expired, renewing if it must.
+
+    A rotating refresh token may be spent exactly once, and this plugin runs
+    as several short-lived processes that all read the same file - a bar
+    surface per monitor, plus whatever the window is doing. Two of them
+    renewing at the same moment would spend the same refresh token twice, and
+    the second answer would be a refusal that leaves the account signed out
+    with a token nobody can renew. So the renewal is taken under a lock, and
+    whoever waited re-reads the file rather than renewing again: by the time
+    they have the lock the work is done and the fresh token is on disk.
+    """
+    if not str(account.get("refreshToken") or ""):
+        return account
+    expires = float(account.get("expiresAt") or 0)
+    if expires and time.time() < expires - REFRESH_MARGIN:
+        return account
+
+    with RenewalSlot(alias):
+        current = read_json(state_path(alias)) or account
+        expires = float(current.get("expiresAt") or 0)
+        if expires and time.time() < expires - REFRESH_MARGIN:
+            return current
+        refresh = str(current.get("refreshToken") or "")
+        if not refresh:
+            return current
+        payload = oauth_call({
+            "client_id": str(current.get("clientId") or ""),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+        })
+        authed = payload.get("authed_user") or {}
+        token = str(authed.get("access_token") or "")
+        if not token:
+            raise AccountError("auth_required",
+                               "Slack would not renew this sign-in. Sign in again.")
+        try:
+            expires_in = float(authed.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            expires_in = 0.0
+        current["token"] = token
+        # Slack hands back a new refresh token each time and retires the one
+        # just spent; keeping the old one would sign this account out at the
+        # next renewal.
+        current["refreshToken"] = str(authed.get("refresh_token") or refresh)
+        current["expiresAt"] = (time.time() + expires_in) if expires_in else 0
+        if authed.get("scope"):
+            current["scopes"] = str(authed.get("scope"))
+        write_json(state_path(alias), current, private=True)
+        return current
+
+
+class RenewalSlot:
+    """The one token renewal an account may have in flight, across processes.
+
+    Unlike `FetchSlot` this one waits rather than failing open, because the
+    thing it protects against is not a duplicated request but a spent refresh
+    token - and it waits with a deadline, because a process that died holding
+    the lock must not sign the account out for good.
+    """
+
+    WAIT = 20.0
+
+    def __init__(self, alias):
+        try:
+            self.path = cache_path(alias, "renew.lock")
+        except AccountError:
+            self.path = ""
+        self._handle = None
+
+    def __enter__(self):
+        if not self.path:
+            return self
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._handle = open(self.path, "a+")
+        except OSError:
+            return self
+        deadline = time.time() + self.WAIT
+        while time.time() < deadline:
+            try:
+                fcntl.flock(self._handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                time.sleep(0.1)
+        return self
+
+    def __exit__(self, *_):
+        if self._handle is None:
+            return False
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self._handle.close()
+        except OSError:
+            pass
+        self._handle = None
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -3815,7 +4286,15 @@ def app_manifest(name=APP_NAME):
     """
     return {
         "display_information": {"name": name, "description": APP_DESCRIPTION},
-        "oauth_config": {"scopes": {"user": list(WANTED_SCOPES)}},
+        "oauth_config": {
+            "scopes": {"user": list(WANTED_SCOPES)},
+            # So an app made this way can also be signed in to through the
+            # browser rather than by pasting its token. The manifest cannot
+            # turn PKCE on - that is a one-way switch on the app's own settings
+            # page, and Slack keeps it out of the manifest for that reason -
+            # but the redirect URLs it needs can be here waiting.
+            "redirect_urls": [redirect_uri(port) for port in REDIRECT_PORTS],
+        },
         "settings": {
             "org_deploy_enabled": False,
             "socket_mode_enabled": False,
@@ -4161,6 +4640,17 @@ def main():
 
     with_account("login-status", "whether this workspace is signed in").set_defaults(
         func=cmd_login_status)
+
+    login_url = with_account("login-url", "begin a browser sign-in; prints the URL to open")
+    login_url.add_argument("--client-id", default="",
+                           help="sign in through an app of your own instead of the shipped one")
+    login_url.set_defaults(func=cmd_login_url)
+
+    login_wait = with_account(
+        "login-wait", "wait for the browser to come back, and store what it brings")
+    login_wait.add_argument("--timeout", type=int, default=SIGN_IN_TIMEOUT,
+                            help="how long to keep listening, in seconds")
+    login_wait.set_defaults(func=cmd_login_wait)
 
     fetch = sub.add_parser("fetch", help="conversations, with previews and unread marks")
     fetch.add_argument("--account", action="append", required=True,

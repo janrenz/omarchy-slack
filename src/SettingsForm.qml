@@ -86,9 +86,55 @@ Column {
 
     Text {
       width: parent.width
-      text: "Create a Slack app for yourself, install it into your workspace, and paste "
-            + "its User OAuth Token here. The plugin's README has the manifest to paste "
-            + "in and the list of scopes."
+      text: "Sign in through your browser: Slack asks which workspace and what this may "
+            + "do, and hands the answer back to this machine. Nothing is pasted and no "
+            + "app of your own is needed."
+      textFormat: Text.PlainText
+      wrapMode: Text.WordWrap
+      color: Qt.darker(Color.foreground, 1.4)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+    }
+
+    Row {
+      spacing: Style.spacing.sm
+
+      Button {
+        enabled: !!root.service && !root.service.signingIn
+                 && String(root.current("account", "")).trim() !== ""
+        text: root.service && root.service.browserSignIn ? "Waiting for Slack…" : "Sign in with Slack"
+        bordered: true
+        foreground: Color.accent
+        fontFamily: Style.font.family
+        fontSize: Style.font.caption
+        onClicked: if (root.service) root.service.signInWithBrowser()
+      }
+
+      Button {
+        visible: !!root.service && root.service.browserSignIn
+        text: "Cancel"
+        bordered: true
+        foreground: Color.foreground
+        fontFamily: Style.font.family
+        fontSize: Style.font.caption
+        onClicked: if (root.service) root.service.cancelBrowserSignIn()
+      }
+    }
+
+    LabeledField {
+      width: parent.width
+      label: "Slack app client id"
+      placeholder: "optional"
+      hint: "Leave empty to sign in through the app this plugin ships. Fill it in to use an app of your own instead - the client id is on its Basic Information page."
+      value: String(root.current("clientId", ""))
+      onEdited: function(value) { root.change("clientId", value) }
+    }
+
+    Text {
+      width: parent.width
+      text: "Or paste a token: create a Slack app for yourself, install it into your "
+            + "workspace, and paste its User OAuth Token here. The plugin's README has "
+            + "the manifest to paste in and the list of scopes."
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
       color: Qt.darker(Color.foreground, 1.4)

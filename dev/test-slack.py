@@ -11,13 +11,19 @@ made about permission or about which host gets the token. Those are the two
 classes of bug that are invisible until they matter.
 """
 
+import base64
+import hashlib
+import inspect
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import slack  # noqa: E402
@@ -2239,6 +2245,243 @@ class SigningOut(unittest.TestCase):
             answer = capture(slack.cmd_remove, args)
             self.assertTrue(answer["ok"])
             self.assertFalse(answer["removed"])
+
+
+class BrowserSignIn(unittest.TestCase):
+    """The PKCE flow: the URL, the socket, and what comes back on it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original_state, self.original_cache = slack.STATE_DIR, slack.CACHE_DIR
+        slack.STATE_DIR = self.dir
+        slack.CACHE_DIR = self.dir
+
+    def tearDown(self):
+        slack.STATE_DIR, slack.CACHE_DIR = self.original_state, self.original_cache
+
+    # -- the secret that never leaves this machine ------------------------
+
+    def test_the_challenge_is_the_sha256_of_the_verifier(self):
+        verifier, challenge = slack.pkce_pair()
+        expected = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+        self.assertEqual(challenge, expected)
+
+    def test_the_verifier_is_within_the_length_the_spec_allows(self):
+        verifier, _ = slack.pkce_pair()
+        self.assertTrue(43 <= len(verifier) <= 128, len(verifier))
+        self.assertNotIn("=", verifier)
+        self.assertRegex(verifier, r"^[A-Za-z0-9_-]+$")
+
+    def test_two_sign_ins_do_not_share_a_verifier(self):
+        self.assertNotEqual(slack.pkce_pair()[0], slack.pkce_pair()[0])
+
+    # -- the URL the browser is sent to -----------------------------------
+
+    def test_the_authorize_url_asks_for_user_scopes_and_no_bot_scopes(self):
+        args = Args()
+        args.client_id = "111.222"
+        answer = capture(slack.cmd_login_url, args)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(answer["url"]).query)
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        self.assertIn("user_scope", query)
+        # A desktop redirect may not ask for bot scopes, and asking anyway is
+        # refused by Slack rather than ignored.
+        self.assertNotIn("scope", query)
+        self.assertEqual(query["client_id"], ["111.222"])
+
+    def test_the_verifier_is_kept_back_from_the_url_and_written_privately(self):
+        args = Args()
+        args.client_id = "111.222"
+        answer = capture(slack.cmd_login_url, args)
+        with open(slack.pending_path("work")) as handle:
+            pending = json.load(handle)
+        self.assertNotIn(pending["verifier"], answer["url"])
+        self.assertIn(pending["state"], answer["url"])
+        mode = os.stat(slack.pending_path("work")).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_without_a_client_id_it_says_so_rather_than_building_a_bad_url(self):
+        args = Args()
+        args.client_id = ""
+        answer = capture(slack.cmd_login_url, args)
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["error"]["code"], "no_client_id")
+
+    def test_waiting_with_nothing_started_is_an_error_not_a_hang(self):
+        args = Args()
+        args.timeout = 1
+        answer = capture(slack.cmd_login_wait, args)
+        self.assertEqual(answer["error"]["code"], "no_sign_in")
+
+    # -- the socket the browser comes back to -----------------------------
+
+    def visit(self, port, path, delay=0.05):
+        """Ask the loopback listener for a path, the way a browser would."""
+        def go():
+            time.sleep(delay)
+            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                conn.sendall(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
+                conn.recv(4096)
+            finally:
+                conn.close()
+        thread = threading.Thread(target=go, daemon=True)
+        thread.start()
+        return thread
+
+    def test_the_code_comes_back_off_the_redirect(self):
+        port = slack.free_port()
+        self.visit(port, slack.REDIRECT_PATH + "?code=abc123&state=thestate")
+        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "abc123")
+
+    def test_a_favicon_does_not_end_the_sign_in(self):
+        """A browser asks for more than the page it was sent to.
+
+        Answering the first connection and stopping would end the sign-in
+        before the redirect arrived - which is the whole reason this listens
+        in a loop rather than accepting once.
+        """
+        port = slack.free_port()
+        self.visit(port, "/favicon.ico")
+        self.visit(port, slack.REDIRECT_PATH + "?code=late&state=thestate", delay=0.3)
+        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "late")
+
+    def test_a_redirect_carrying_somebody_elses_state_is_not_taken(self):
+        port = slack.free_port()
+        self.visit(port, slack.REDIRECT_PATH + "?code=stolen&state=wrong")
+        self.visit(port, slack.REDIRECT_PATH + "?code=ours&state=thestate", delay=0.3)
+        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "ours")
+
+    def test_a_refusal_in_the_browser_comes_back_as_one(self):
+        port = slack.free_port()
+        self.visit(port, slack.REDIRECT_PATH + "?error=access_denied&state=thestate")
+        with self.assertRaises(slack.AccountError) as caught:
+            slack.wait_for_redirect(port, "thestate", timeout=5)
+        self.assertEqual(caught.exception.code, "denied")
+
+    def test_nobody_coming_back_gives_up_rather_than_waiting_for_ever(self):
+        port = slack.free_port()
+        started = time.monotonic()
+        with self.assertRaises(slack.AccountError) as caught:
+            slack.wait_for_redirect(port, "thestate", timeout=1)
+        self.assertEqual(caught.exception.code, "sign_in_timeout")
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_the_listener_is_not_reachable_from_off_this_machine(self):
+        """Bound to the loopback address, not to every interface.
+
+        What listens here hands an authorization code to whoever asks in the
+        right shape, so the set of people who can ask matters.
+        """
+        source = inspect.getsource(slack.wait_for_redirect)
+        self.assertIn('"127.0.0.1"', source)
+        self.assertNotIn('"0.0.0.0"', source)
+
+
+class RotatingTokens(unittest.TestCase):
+    """A token that expires, and the refresh token that is spent to renew it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original_state, self.original_cache = slack.STATE_DIR, slack.CACHE_DIR
+        slack.STATE_DIR = self.dir
+        slack.CACHE_DIR = self.dir
+        self.calls = []
+
+    def tearDown(self):
+        slack.STATE_DIR, slack.CACHE_DIR = self.original_state, self.original_cache
+
+    def scripted(self, answer):
+        def call(params):
+            self.calls.append(dict(params))
+            return answer
+        return call
+
+    def account(self, **extra):
+        account = dict({
+            "alias": "work", "token": "xoxe.xoxp-old", "clientId": "111.222",
+            "refreshToken": "xoxe-1-old", "expiresAt": time.time() - 1,
+            "scopes": "im:history",
+        }, **extra)
+        slack.write_json(slack.state_path("work"), account, private=True)
+        return account
+
+    def test_a_pasted_token_has_nothing_to_renew_and_is_left_alone(self):
+        account = self.account(refreshToken="", token="xoxp-static", expiresAt=0)
+        original = slack.oauth_call
+        slack.oauth_call = self.scripted({"ok": True})
+        try:
+            self.assertEqual(slack.refreshed("work", account)["token"], "xoxp-static")
+        finally:
+            slack.oauth_call = original
+        self.assertEqual(self.calls, [])
+
+    def test_a_token_with_hours_left_is_not_renewed(self):
+        account = self.account(expiresAt=time.time() + 3600)
+        original = slack.oauth_call
+        slack.oauth_call = self.scripted({"ok": True})
+        try:
+            self.assertEqual(slack.refreshed("work", account)["token"], "xoxe.xoxp-old")
+        finally:
+            slack.oauth_call = original
+        self.assertEqual(self.calls, [])
+
+    def test_an_expired_token_is_renewed_and_the_new_one_written_down(self):
+        account = self.account()
+        original = slack.oauth_call
+        slack.oauth_call = self.scripted({"ok": True, "authed_user": {
+            "access_token": "xoxe.xoxp-new", "refresh_token": "xoxe-1-new",
+            "expires_in": 43200, "scope": "im:history,chat:write"}})
+        try:
+            fresh = slack.refreshed("work", account)
+        finally:
+            slack.oauth_call = original
+        self.assertEqual(fresh["token"], "xoxe.xoxp-new")
+        self.assertEqual(self.calls[0]["grant_type"], "refresh_token")
+        self.assertEqual(self.calls[0]["refresh_token"], "xoxe-1-old")
+        # No client secret exists to send, and sending an empty one would be
+        # a different request than the one PKCE describes.
+        self.assertNotIn("client_secret", self.calls[0])
+        with open(slack.state_path("work")) as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk["token"], "xoxe.xoxp-new")
+        self.assertEqual(on_disk["scopes"], "im:history,chat:write")
+
+    def test_the_spent_refresh_token_is_replaced_by_the_one_that_came_back(self):
+        """Slack retires a refresh token as it is spent.
+
+        Keeping the old one would work exactly once more - at the next
+        renewal, which would be refused, signing the account out with no way
+        back but a fresh sign-in.
+        """
+        account = self.account()
+        original = slack.oauth_call
+        slack.oauth_call = self.scripted({"ok": True, "authed_user": {
+            "access_token": "xoxe.xoxp-new", "refresh_token": "xoxe-1-new", "expires_in": 43200}})
+        try:
+            slack.refreshed("work", account)
+        finally:
+            slack.oauth_call = original
+        with open(slack.state_path("work")) as handle:
+            self.assertEqual(json.load(handle)["refreshToken"], "xoxe-1-new")
+
+    def test_a_refusal_to_renew_asks_for_a_sign_in_rather_than_crashing(self):
+        account = self.account()
+        original = slack.oauth_call
+
+        def refuse(params):
+            raise slack.AccountError("exchange_failed", "no")
+        slack.oauth_call = refuse
+        try:
+            with self.assertRaises(slack.AccountError):
+                slack.refreshed("work", account)
+        finally:
+            slack.oauth_call = original
+
+    def test_a_rotating_token_is_refused_when_pasted_and_taken_when_renewable(self):
+        self.assertIn("rotates", slack.token_problem("xoxe.xoxp-1", "im:history"))
+        self.assertEqual(slack.token_problem("xoxe.xoxp-1", "im:history", renewable=True), "")
 
 
 if __name__ == "__main__":

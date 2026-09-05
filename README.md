@@ -106,14 +106,54 @@ are deliberately left behind — delete them yourself if you want them gone:
 The Slack app is yours and is untouched either way; delete it at
 [api.slack.com/apps](https://api.slack.com/apps) if you are done with it.
 
-## You need a Slack app of your own
+## Signing in
 
-This is the one part nobody can do for you.
+Press **Sign in with Slack**, in the window or in settings. Your browser opens
+Slack's own permission page, you pick the workspace and press Allow, and Slack
+sends you back to this machine signed in. Nothing is pasted and no app of your
+own is needed.
 
-Slack has no device-code flow, and it will not redirect a browser back to a
-desktop that has no `https` address to be sent to — so there is no sign-in this
-plugin could host. What Slack does offer, and what every personal integration
-uses, is an app you install into your own workspace and a token it shows you.
+That was not possible for most of this plugin's life, and the README used to
+say so: Slack had no device-code flow and would not redirect a browser to a
+desktop with no `https` address to be sent to. Slack made **PKCE** generally
+available on 2026-03-30 and that stopped being true. A public client — one with
+no secret to keep, which a plugin shipped as source is — proves it started the
+sign-in it is finishing by holding a random secret back until the end: the
+browser carries a SHA-256 of it, the token exchange carries the secret itself,
+and an authorization code stolen in between is worth nothing without it.
+
+Three details of that flow are worth knowing, because they are what makes it
+safe to ship:
+
+- **There is no client secret.** `oauth.v2.access` takes none for a public
+  client — not an empty one, none. The client id in the source is an
+  identifier, the way a username is.
+- **The browser comes back to `localhost`**, on a port this plugin holds only
+  while a sign-in is in progress, bound to the loopback address and to nothing
+  else. It checks the `state` it started with before it looks at anything else
+  in the redirect, so a link from somewhere else cannot finish somebody's
+  sign-in for them.
+- **A desktop sign-in may not ask for bot scopes**, which suits a plugin that
+  has never wanted one. It reads what you can read and posts as you.
+
+The token from this flow lasts twelve hours and is renewed from a refresh
+token that rotates with it. That happens on its own, before a poll that would
+otherwise fail; there is nothing to do about it and nothing to re-paste.
+
+### Or an app of your own
+
+A workspace that would rather be its own app — for its admins' own audit
+trail, or because it does not allow this one — puts that app's **client id**
+into the plugin's settings, and the browser sign-in above uses it instead.
+The client id is on the app's Basic Information page. For PKCE it also needs
+**Settings → OAuth & Permissions → Advanced token security via PKCE** turned
+on, which Slack makes a one-way switch, and the three redirect URLs the
+manifest below carries.
+
+### Or paste a token
+
+The old way still works, and is still the way in for a workspace where the
+browser flow is refused outright.
 
 1. Go to **[api.slack.com/apps](https://api.slack.com/apps) → Create New App →
    From an app manifest**, pick your workspace, and paste this:
@@ -123,6 +163,10 @@ uses, is an app you install into your own workspace and a token it shows you.
      name: Omarchy Slack
      description: Slack in the Omarchy bar
    oauth_config:
+     redirect_urls:
+       - http://localhost:45877/omarchy-slack
+       - http://localhost:45878/omarchy-slack
+       - http://localhost:45879/omarchy-slack
      scopes:
        user:
          - channels:history
@@ -397,6 +441,7 @@ is the line that writes it into the registry — so the plugin brings its own.
 | Key | Default | What it does |
 |---|---|---|
 | `account` | — | **Required.** A short name for this sign-in. It names the token file, not the Slack workspace. |
+| `clientId` | — | Optional. Empty signs in through the app this plugin ships; a client id of your own signs in through that app instead. An identifier, not a secret — only the browser sign-in uses it. |
 | `conversations` | `40` | How many conversations may be asked how much of them you have read, per poll (5–120). The previews cost one search for the whole workspace, so this is only about the unread marks. |
 | `sort` | `recent` | `recent` puts whatever spoke last at the top of each section; `name` is alphabetical. |
 | `density` | `cosy` | How much room the window gives things: `compact`, `cosy`, `roomy`, `spacious`. A multiplier over the theme's own spacing, so it follows your font size. |
@@ -715,6 +760,44 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.9.0 — 2026-09-05
+
+- **Sign in through the browser, with no app of your own.** Press **Sign in
+  with Slack**: your browser opens Slack's permission page, and Slack sends the
+  answer back to this machine. Nothing to create on api.slack.com, nothing to
+  paste, no token to keep track of.
+
+  This was impossible until it wasn't. Slack had no device-code flow and would
+  not redirect to a desktop with no `https` address, which is why this plugin
+  asked everybody to make an app and copy a token out of it — and why it is the
+  only one of these plugins that could be installed but not used. Slack made
+  PKCE generally available on 2026-03-30, and a public client with no secret to
+  keep is exactly what a plugin shipped as source is. The verifier never leaves
+  this machine, the browser carries only its SHA-256, and the code that comes
+  back is worth nothing without it.
+
+- **The socket the browser comes back to is as small as it can be.** Bound to
+  the loopback address rather than to every interface; it checks the `state` it
+  started with, in constant time, before it looks at the code; and it keeps
+  listening past the favicon and the preconnect a browser fires at anything it
+  is pointed at, rather than answering the first connection and calling the
+  sign-in finished.
+
+- **A token that expires is renewed rather than re-pasted.** This flow hands
+  out a twelve-hour token and a refresh token that rotates with it, so the
+  renewal happens on its own, before the poll that would have failed. A refresh
+  token may be spent exactly once and this plugin is several processes at once —
+  a bar surface per monitor, plus the window — so the renewal is taken under a
+  lock and whoever waited re-reads the file rather than spending the same token
+  twice. The old warning against rotating tokens still stands for one pasted by
+  hand, because there is no refresh token beside it.
+
+- **An app of your own still works, and is now easier to make into one of
+  these.** Put its client id in settings and the browser sign-in uses it; the
+  manifest `create-app` writes now carries the three loopback redirect URLs, so
+  the only thing left to press is the PKCE switch on the app's own settings
+  page. Pasting a token still works exactly as before.
 
 ### 0.8.0 — 2026-09-02
 

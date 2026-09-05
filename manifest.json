@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "janrenz.omarchy.slack",
   "name": "Slack",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "author": "Jan Renz",
   "license": "MIT",
-  "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Needs python3 (standard library only) and a Slack app of yours - see the README. Talks to the Slack Web API and nothing else.",
+  "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Sign in through your browser - no Slack app of your own to create, nothing to paste. Needs python3 (standard library only). Talks to the Slack Web API and nothing else.",
   "kinds": [
     "bar-widget",
     "panel"
@@ -49,6 +49,12 @@
         "type": "string",
         "label": "Workspace name",
         "description": "A short name for this sign-in, e.g. work. Letters, numbers, dot, dash and underscore. It names the token file, not the Slack workspace."
+      },
+      {
+        "key": "clientId",
+        "type": "string",
+        "label": "Slack app client id",
+        "description": "Optional. Leave empty to sign in through the app this plugin ships. Fill it in to sign in through an app of your own instead - the client id is on its Basic Information page, and it is an identifier rather than a secret. Only the browser sign-in uses it; pasting a token ignores it."
       },
       {
         "key": "conversations",

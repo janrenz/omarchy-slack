@@ -18,6 +18,10 @@ Item {
   property string pluginDir: ""
 
   readonly property string alias: String(setting("account", "")).trim()
+  // Empty means sign in through the app this plugin ships. A workspace that
+  // would rather be its own app - for its admins' audit trail, or because it
+  // does not allow this one - names it here.
+  readonly property string clientId: String(setting("clientId", "")).trim()
   readonly property int conversationCount: intSetting("conversations", 40, 5, 120)
   readonly property string sortOrder: String(setting("sort", "recent")) === "name" ? "name" : "recent"
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 120, 30, 3600)
@@ -1413,6 +1417,82 @@ Item {
         + " as " + String(parsed.user || "")
       root.refresh()
     }
+  }
+
+  // The other way in: the browser, and no app of your own.
+  //
+  // Two processes rather than one, because the helper answers a command with
+  // one JSON object and this needs two answers - the URL to open, and then
+  // what came back once somebody has been to it. The order matters: the
+  // socket is listening before the browser is sent anywhere, so a person who
+  // clicks Allow immediately is not answered by a port nobody is holding yet.
+  property bool browserSignIn: false
+
+  function signInWithBrowser() {
+    if (signingIn || pluginDir === "" || !configured) return
+    signingIn = true
+    browserSignIn = true
+    signInError = ""
+    signInMessage = "Opening Slack in your browser…"
+    var command = ["python3", helper(), "login-url", "--account", alias]
+    if (String(clientId).trim() !== "") command = command.concat(["--client-id", String(clientId).trim()])
+    signInUrlProc.command = command
+    signInUrlProc.running = true
+  }
+
+  Process {
+    id: signInUrlProc
+    running: false
+    stdout: StdioCollector { id: signInUrlOut; waitForEnd: true }
+    stderr: StdioCollector { id: signInUrlErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var parsed = Model.parseJson(signInUrlOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.signingIn = false
+        root.browserSignIn = false
+        root.signInMessage = ""
+        root.signInError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(signInUrlErr.text || "Could not start a sign-in", 160)
+        return
+      }
+      // Listening first, opening second.
+      signInWaitProc.command = ["python3", root.helper(), "login-wait", "--account", root.alias]
+      signInWaitProc.running = true
+      root.signInMessage = "Finish the sign-in in your browser."
+      root.openUrl(String(parsed.url || ""))
+    }
+  }
+
+  Process {
+    id: signInWaitProc
+    running: false
+    stdout: StdioCollector { id: signInWaitOut; waitForEnd: true }
+    stderr: StdioCollector { id: signInWaitErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.signingIn = false
+      root.browserSignIn = false
+      var parsed = Model.parseJson(signInWaitOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.signInMessage = ""
+        root.signInError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(signInWaitErr.text || "The sign-in did not finish", 160)
+        return
+      }
+      root.signInError = ""
+      root.signInMessage = "Signed in to " + String(parsed.team || "Slack")
+        + " as " + String(parsed.user || "")
+      root.refresh()
+    }
+  }
+
+  function cancelBrowserSignIn() {
+    if (!browserSignIn) return
+    signInWaitProc.running = false
+    signingIn = false
+    browserSignIn = false
+    signInMessage = ""
   }
 
   function signOut() {
