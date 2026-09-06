@@ -2724,16 +2724,29 @@ class SchemeRedirect(unittest.TestCase):
         finally:
             slack.desktop_path = original
 
-    def test_the_app_manifest_offers_the_scheme_and_keeps_the_ports(self):
-        """Both are registered, so the machine decides which is used.
+    def test_a_new_app_is_not_asked_to_take_the_scheme_yet(self):
+        """Slack refuses a custom scheme from an app that is not a PKCE client.
 
-        The scheme is what a distributed app may keep; the ports are what a
-        machine with no handler - or a sandboxed browser that cannot see one -
-        still signs in through.
+        "We will reject any custom URI schemes if PKCE parameters are not
+        used" - and PKCE cannot be turned on in a manifest, because it is a
+        one-way switch on the app's own settings page. So an app being created
+        has PKCE off by definition, and a manifest carrying the scheme would be
+        refused at the moment it is least useful. This is the ordering the
+        README documents, kept honest here.
         """
-        manifest = slack.app_manifest("Test")
-        urls = manifest["oauth_config"]["redirect_urls"]
-        self.assertEqual(urls[0], slack.SCHEME_REDIRECT)
+        urls = slack.app_manifest("Test")["oauth_config"]["redirect_urls"]
+        self.assertNotIn(slack.SCHEME_REDIRECT, urls)
+        for port in slack.REDIRECT_PORTS:
+            self.assertIn(slack.redirect_uri(port), urls)
+
+    def test_an_app_that_already_has_pkce_can_be_given_the_scheme(self):
+        """Both are registered then, so the machine decides which is used.
+
+        The ports are what a machine with no handler - or a sandboxed browser
+        that cannot see one - still signs in through.
+        """
+        urls = slack.app_manifest("Test", scheme=True)["oauth_config"]["redirect_urls"]
+        self.assertIn(slack.SCHEME_REDIRECT, urls)
         for port in slack.REDIRECT_PORTS:
             self.assertIn(slack.redirect_uri(port), urls)
 

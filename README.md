@@ -155,6 +155,18 @@ python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-regi
 python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-status
 ```
 
+**If you are signing in through an app of your own, turn PKCE on before you add
+this URL to it, and in that order.** Slack refuses a custom URI scheme from an
+app that is not a PKCE public client — *"we will reject any custom URI schemes
+if PKCE parameters are not used"* — and it refuses it in the Redirect URLs
+field, where the message is the generic **"A valid URL must be entered"** and
+says nothing about PKCE. The switch is **Settings → OAuth & Permissions →
+Advanced token security via PKCE**, Slack makes it one-way, and the field
+accepts `omarchy-slack://auth` once it is on. This is also why the manifest
+below carries only the three `localhost` URLs: an app being created has PKCE
+off by definition, so a manifest naming the scheme would be rejected at the one
+moment you cannot do anything about it.
+
 That writes one desktop entry under `~/.local/share/applications/` and points
 `xdg-mime` at it, for your user alone. Nothing needs root and nothing outside
 your home directory is touched. `scheme-forget` undoes it.
@@ -200,7 +212,6 @@ browser flow is refused outright.
      description: Slack in the Omarchy bar
    oauth_config:
      redirect_urls:
-       - omarchy-slack://auth
        - http://localhost:45877/omarchy-slack
        - http://localhost:45878/omarchy-slack
        - http://localhost:45879/omarchy-slack
@@ -797,6 +808,23 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.9.6 — 2026-09-06
+
+- **Adding `omarchy-slack://auth` to an app needs PKCE turned on first**, and
+  Slack does not say so: the Redirect URLs field answers with the generic *"A
+  valid URL must be entered"*. Its rule is that a custom URI scheme is refused
+  from an app that is not a PKCE public client, so the switch —
+  **Settings → OAuth & Permissions → Advanced token security via PKCE**, which
+  is one-way — has to be on before the field will take it. Documented where
+  the handler is set up.
+
+- **The manifest for a new app no longer carries the scheme.** 0.9.5 put it
+  there, which was wrong for the same reason: an app being created has PKCE
+  off by definition, because a manifest cannot turn it on, so a manifest
+  naming the scheme would be refused at the one moment nothing could be done
+  about it. A new app gets the three `localhost` URLs, and the scheme is added
+  afterwards along with PKCE.
 
 ### 0.9.5 — 2026-09-06
 

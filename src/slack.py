@@ -4636,12 +4636,22 @@ APP_NAME = "Omarchy Slack"
 APP_DESCRIPTION = "Slack channels, DMs and threads in the Omarchy bar"
 
 
-def app_manifest(name=APP_NAME):
+def app_manifest(name=APP_NAME, scheme=False):
     """The app this plugin wants, built from the scope list above.
 
     One list, not two: a manifest in the README that drifts from what the code
     checks for is a plugin that says a feature is missing while the app it told
     you to make has the scope.
+
+    `scheme` is off for a new app, and that ordering is not a preference.
+    Slack refuses a custom URI scheme from an app that is not a PKCE public
+    client - "we will reject any custom URI schemes if PKCE parameters are not
+    used" - and PKCE cannot be turned on in a manifest, because it is a
+    one-way switch on the app's own settings page. So an app being created has
+    PKCE off by definition, and a manifest carrying the scheme would be
+    refused at the moment it is least useful. Turn PKCE on, then add the
+    scheme; `scheme=True` is for building the manifest of an app that is
+    already there.
     """
     return {
         "display_information": {"name": name, "description": APP_DESCRIPTION},
@@ -4651,13 +4661,10 @@ def app_manifest(name=APP_NAME):
             # browser rather than by pasting its token. The manifest cannot
             # turn PKCE on - that is a one-way switch on the app's own settings
             # page, and Slack keeps it out of the manifest for that reason -
-            # but the redirect URLs it needs can be here waiting.
-            # The scheme first, because it is the one a distributed app is
-            # allowed to keep: it is not `http`, so the rule that a redirect
-            # URL must be `https` has nothing to say about it. The three ports
-            # stay for the machines the scheme cannot reach - no handler
-            # registered, or a sandboxed browser that cannot see one.
-            "redirect_urls": [SCHEME_REDIRECT] + [redirect_uri(port) for port in REDIRECT_PORTS],
+            # but the redirect URLs it needs can be here waiting. All but one:
+            # see `scheme` above for why that one cannot be here yet.
+            "redirect_urls": ([redirect_uri(port) for port in REDIRECT_PORTS]
+                              + ([SCHEME_REDIRECT] if scheme else [])),
         },
         "settings": {
             "org_deploy_enabled": False,
