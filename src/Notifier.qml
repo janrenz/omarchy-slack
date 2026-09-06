@@ -126,6 +126,12 @@ QtObject {
   property var replaceIds: ({})
 
   function send(summary, body, exec, replaceKey) {
+    // `enabled` used to gate only `observe`, which was true of every caller
+    // while announcing messages was the only thing this did. A second
+    // Notifier that sends directly made that an accident waiting to happen -
+    // its `enabled: !demo` read as a demo guard and was not one, so a
+    // showcase run would have pushed a real toast onto a real desktop.
+    if (!enabled) return
     var next = queue.slice()
     next.push({
       summary: String(summary || ""),

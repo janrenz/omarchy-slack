@@ -311,6 +311,23 @@ Item {
     enabled: root.notifies && root.notifyOnNew && !root.demo
   }
 
+  // Toasts about this plugin rather than about somebody's message, so the
+  // rules that govern the one above do not apply to it. `notifies` elects a
+  // single announcer among several Services because a message would otherwise
+  // be announced once per monitor; a sign-in is finished by exactly one
+  // Service - the one that started it - so there is nothing to elect. And
+  // `notifyOnNew` is the user saying they do not want to hear about other
+  // people's messages, which is not a request to be told nothing at all.
+  // Off in demo for the same reason the other one is: dev/showcase.sh should
+  // not push invented events onto a real desktop.
+  Notifier {
+    id: lifecycle
+    appName: "Slack"
+    glyph: "󰒱"
+    defaultExec: root.summonArgv("{}")
+    enabled: !root.demo
+  }
+
   // Another workspace's messages are not this one's, and signing out means the
   // next sign-in starts over: prime again rather than announce the backlog.
   //
@@ -1375,6 +1392,10 @@ Item {
   property bool signingIn: false
   property string signInMessage: ""
   property string signInError: ""
+
+  // A browser sign-in finished. The window listens for this to bring itself
+  // back to the front; the bar's Service has no window and ignores it.
+  signal signedInNow(string team)
   // Held for exactly as long as it takes to hand to the helper, and cleared
   // the moment the process has it.
   property string pendingToken: ""
@@ -1484,6 +1505,19 @@ Item {
       root.signInMessage = "Signed in to " + String(parsed.team || "Slack")
         + " as " + String(parsed.user || "")
       root.refresh()
+      // The browser has had the screen for the last half minute and still has
+      // it. This is the one sign-in route where nothing gives the focus back:
+      // the callback goes to a handler that delivers and exits, not to a tab
+      // that could be closed - so the window asks the compositor for the
+      // front itself. Only this path, because pasting a token happens in the
+      // window, which already has the focus.
+      root.signedInNow(String(parsed.team || "Slack"))
+      // And a toast, because the window may be on a workspace that is not the
+      // one being looked at - in which case the raise is invisible and the
+      // first poll is the only sign anything happened.
+      lifecycle.send("Slack connected",
+                     "Fetching your conversations…",
+                     root.summonArgv("{}"), "signin")
     }
   }
 

@@ -4150,13 +4150,17 @@ def wait_for_scheme(state, timeout=SIGN_IN_TIMEOUT, finish=None):
             if split.scheme != SCHEME:
                 continue
             query = urllib.parse.parse_qs(split.query)
+            # `state` first, and before the refusal is honoured. A callback
+            # carrying `error` is still a callback somebody else's page can
+            # cause, so treating one as an answer before checking whose it is
+            # lets a stale link cancel a sign-in that is still going.
+            came_back = (query.get("state") or [""])[0]
+            if not secrets.compare_digest(str(came_back), str(state)):
+                continue
             refused = (query.get("error") or [""])[0]
             if refused:
                 raise AccountError("denied", friendly(refused) if refused != "access_denied"
                                    else "The sign-in was refused in the browser.")
-            came_back = (query.get("state") or [""])[0]
-            if not secrets.compare_digest(str(came_back), str(state)):
-                continue
             code = (query.get("code") or [""])[0]
             if not code:
                 continue

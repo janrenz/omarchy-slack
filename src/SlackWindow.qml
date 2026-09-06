@@ -3,6 +3,7 @@ import QtCore
 import QtQuick.Controls
 import QtQuick.Dialogs
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -41,10 +42,74 @@ Item {
   function open(payloadJson) {
     closingFromHost = false
     loadSettings()
+    // Remembered before the payload is applied, because applying one opens a
+    // conversation and the conversation is in the window's title - a moment
+    // later Hyprland still knows this window by the name it had here.
+    var knownAs = window.visible ? String(window.title) : ""
     var payload = Model.parseJson(payloadJson, null)
     if (payload) applyPayload(payload)
     window.visible = true
+    focusToplevel(knownAs)
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  // Bring an already-open window to the front, on the workspace somebody is
+  // actually looking at.
+  //
+  // `window.visible = true` on a window that is already visible does nothing
+  // at all - no raise, no workspace switch, no keyboard focus - so opening
+  // Slack while its window sat on another workspace, or in the scratchpad,
+  // looked exactly like the click had been swallowed. Qt's forceActiveFocus
+  // above only moves focus around *inside* the window; the compositor has to
+  // be asked separately.
+  //
+  // An empty name means the window was not mapped a moment ago, and a window
+  // Hyprland is about to see for the first time is focused by Hyprland itself.
+  function focusToplevel(knownAs) {
+    if (String(knownAs) === "") return
+    var all = Hyprland.toplevels ? Hyprland.toplevels.values : []
+    for (var i = 0; i < all.length; i++) {
+      // Matched on the title because a client cannot ask which toplevel is its
+      // own. It is this file's own string rather than a guess at the shape of
+      // somebody else's window, so the match is exact and stays exact.
+      if (all[i] && String(all[i].title) === String(knownAs)) {
+        dispatchFocus(all[i])
+        return
+      }
+    }
+    // An empty list is not a failed match, it is not knowing: Hyprland's
+    // toplevels are only as fresh as the last event it sent, a shell that has
+    // just started has had none, and a compositor that is not Hyprland never
+    // sends any. Warning here fires on every offscreen harness run and on
+    // every non-Hyprland desktop, which is the kind of false alarm that
+    // teaches people to ignore the log.
+    if (all.length === 0) return
+
+    // Falling out of the loop with windows to search *is* worth a line, and
+    // the reason is that it is otherwise silent: the window stays where it is,
+    // which looks exactly like a summon nobody sent. It means Hyprland holds
+    // no window by this title - stale, or a title that changed between being
+    // read and being looked up.
+    //
+    // The titles are gathered here rather than above so that a working focus
+    // costs nothing: this used to build a joined list of every window on the
+    // machine on every call, and print it whether or not anything was wrong.
+    var titles = []
+    for (var t = 0; t < all.length; t++)
+      if (all[t]) titles.push(String(all[t].title))
+    console.warn("slack: no toplevel titled '" + knownAs + "' to focus; Hyprland knows "
+                 + all.length + ": " + titles.join(" | "))
+  }
+
+  function dispatchFocus(toplevel) {
+    var matcher = "address:0x" + toplevel.address
+    // Two syntaxes, because this plugin is not installed on one machine only.
+    // Hyprland takes a Lua expression now and rejects the classic string form
+    // outright - `focuswindow address:0x...` comes back "')' expected near
+    // 'address'" - while the releases before it take only the string.
+    Hyprland.dispatch(Hyprland.usingLua === true
+                      ? "hl.dsp.focus({ window = '" + matcher + "' })"
+                      : "focuswindow " + matcher)
   }
 
   // What the shell may deliver with a summon: a conversation to show - a
@@ -142,6 +207,26 @@ Item {
     id: service
     settings: root.settings
     pluginDir: root.pluginDir
+
+    // A browser sign-in has just finished, and the browser still has the
+    // screen: the callback is delivered to a handler that exits, so unlike a
+    // tab-based redirect there is nothing left over to close and hand the
+    // focus back. Ask the compositor for the front.
+    //
+    // Only when this window is mapped. A sign-in driven from the bar's
+    // settings pane with no window open should not conjure one - the toast
+    // that goes out beside this is what tells that case it worked.
+    onSignedInNow: function (team) {
+      // Signing in is nearly always done from the settings pane or the
+      // sign-in card, and both of those are the last thing anybody wants to
+      // be looking at once it worked. Land on the conversations instead, with
+      // the list focused so j/k work without a click.
+      root.showSettings = false
+      root.focusList()
+      if (!window.visible)
+        return
+      root.focusToplevel(String(window.title))
+    }
   }
 
   // ---- keyboard -----------------------------------------------------------
@@ -636,6 +721,11 @@ Item {
     mentionCursor = 0
     service.clearMentions()
   }
+
+  // The toplevel list is only as fresh as the last event Hyprland sent, and a
+  // shell that has just started has had none. Ask once, so the first summon at
+  // an already-open window has something to match against.
+  Component.onCompleted: Hyprland.refreshToplevels()
 
   FloatingWindow {
     id: window
@@ -1325,19 +1415,64 @@ Item {
 
               Row {
                 spacing: Style.spacing.sm
+                visible: !service.browserSignIn
 
                 Button {
                   enabled: !service.signingIn
-                  text: service.browserSignIn ? "Waiting for Slack…" : "Sign in with Slack"
+                  text: "Sign in with Slack"
                   bordered: true
                   foreground: Color.accent
                   fontFamily: Style.font.family
                   fontSize: Style.font.caption
                   onClicked: service.signInWithBrowser()
                 }
+              }
+
+              // Waiting for the browser, as a state of its own rather than a
+              // word on a button. It is the only part of this plugin that
+              // waits on something outside the machine, it can wait for five
+              // minutes, and the button-label version left it looking like
+              // nothing had happened.
+              //
+              // The second line is not padding. Slack does not always send a
+              // refusal back to a custom scheme, so pressing Cancel on its
+              // consent page can leave this waiting for a callback that will
+              // never arrive - and the only thing that ends it is this Cancel
+              // or the timeout. Saying so beats looking stuck.
+              Column {
+                width: parent.width
+                spacing: Style.spacing.xs
+                visible: service.browserSignIn
+
+                Row {
+                  spacing: Style.spacing.sm
+
+                  Spinner {
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Color.accent
+                  }
+
+                  Text {
+                    text: "Waiting for Slack in your browser…"
+                    textFormat: Text.PlainText
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Pick the workspace and press Allow. If you closed the tab or "
+                        + "refused there, press Cancel — Slack does not always tell us."
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: Qt.darker(Color.foreground, 1.4)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
 
                 Button {
-                  visible: service.browserSignIn
                   text: "Cancel"
                   bordered: true
                   foreground: Color.foreground

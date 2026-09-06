@@ -2723,6 +2723,23 @@ class SchemeRedirect(unittest.TestCase):
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["error"]["code"], "scheme_not_registered")
 
+    def test_somebody_elses_refusal_does_not_cancel_this_sign_in(self):
+        """`state` is checked before `error` is honoured.
+
+        A callback carrying `error` is still a callback that a page somewhere
+        else can cause. Honouring one before checking whose it is lets a stale
+        link end a sign-in that is still going - the refusal is an answer only
+        once it is established to be an answer to this question.
+        """
+        stale = self.deliver("omarchy-slack://auth?error=access_denied&state=NOT-MINE", delay=0.2)
+        mine = self.deliver("omarchy-slack://auth?code=GOOD&state=MINE", delay=0.8)
+        try:
+            got = slack.wait_for_scheme("MINE", timeout=10, finish=lambda code: code)
+        finally:
+            stale.join(10)
+            mine.join(10)
+        self.assertEqual(got, "GOOD")
+
     def test_the_exchange_names_the_redirect_the_browser_was_sent_to(self):
         """Slack matches `redirect_uri` on the exchange against the one on the
         authorize URL, so the two halves cannot be built independently. The

@@ -814,6 +814,43 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.10.1 — 2026-09-06
+
+- **Summoning the window when it is already open now brings it to the front.**
+  Setting a visible window visible again does nothing at all — no raise, no
+  workspace switch, no keyboard focus — so a clicked notification, or a row in
+  the dropdown, looked exactly like it had been swallowed whenever the window
+  was on another workspace or behind something. It asks the compositor now.
+
+- **Finishing a browser sign-in comes back to you.** The callback goes to a
+  handler that delivers and exits, so unlike a tab-based redirect there is
+  nothing left over to close and hand the focus back — the browser simply kept
+  it. The window now raises itself, and a **Slack connected** notification goes
+  out beside it for the case where the window is on a workspace you are not
+  looking at, where a raise is invisible.
+
+- **And it lands on your conversations, not on the settings pane** you started
+  the sign-in from, with the list focused so `j`/`k` work without a click.
+
+- **Waiting for the browser is a state now, not a word on a button.** A
+  spinner, what it is waiting for, and Cancel. It also says plainly that if
+  you refused in the browser you should press Cancel — because Slack does not
+  always send a refusal back to a custom scheme, and without one this waits
+  for the full five minutes looking stuck. That is the honest shape of it: a
+  refusal that *does* arrive has always ended the sign-in immediately.
+
+- **A stale callback can no longer cancel a live sign-in.** The `state` a
+  sign-in started with is checked before an `error` in the callback is
+  honoured, rather than after — a callback carrying `error` is still one a page
+  somewhere else can cause, and it is an answer only once it is established to
+  be an answer to this question.
+
+- **The focus path no longer narrates itself into the journal.** It logged
+  three lines on every summon, one of which joined the titles of every window
+  on the machine whether or not anything was wrong. It says nothing when it
+  works, and warns once when it finds no window to focus — which is the outcome
+  that is otherwise completely silent.
+
 ### 0.10.0 — 2026-09-06
 
 **The `http://localhost` sign-in route is gone.** If you signed in already,
