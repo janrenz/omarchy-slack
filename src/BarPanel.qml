@@ -44,8 +44,9 @@ Panel {
   readonly property color dim: Qt.darker(fg, 1.5)
 
   // Rows come from the Service already filtered to what is unread, so this
-  // draws the same list the window's unread toggle draws - including its
-  // "Nothing unread" note, which is a truer empty state than a blank panel.
+  // draws the same list the window's unread toggle draws. The empty state is
+  // this panel's own - see the note below the list - because a blank panel
+  // and a broken one look identical.
   //
   // Minus the headings. "Direct messages" over a list where a heading is a
   // third of the rows says nothing the panel has not already said, and the
@@ -314,6 +315,22 @@ Panel {
               onPicked: function(row) { root.openRow(row) }
             }
           }
+        }
+
+        // Caught up. `ConversationList` is a Repeater over `rows`, so with
+        // nothing unread it draws nothing at all - and a panel that opens
+        // blank reads as one that failed to load, which is the report this
+        // was written from. The header says it too, in a subtitle small
+        // enough to miss while looking at the empty space below it.
+        Text {
+          width: parent.width
+          visible: !!root.service && root.service.signedIn && root.rows.length === 0
+          text: "Nothing unread."
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
 
         // Signing in, and anything the workspace is complaining about. Both go

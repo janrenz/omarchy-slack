@@ -11,6 +11,7 @@ made about permission or about which host gets the token. Those are the two
 classes of bug that are invisible until they matter.
 """
 
+import ast
 import base64
 import hashlib
 import inspect
@@ -2504,6 +2505,45 @@ class RotatingTokens(unittest.TestCase):
         with open(slack.state_path("work")) as handle:
             self.assertEqual(json.load(handle)["refreshToken"], "xoxe-1-new")
 
+    def test_a_refresh_answers_at_the_top_level_and_is_read_there(self):
+        """The two grants answer in two shapes, and the tests knew only one.
+
+        Exchanging an authorization code describes both the app and the person,
+        so the user's token arrives under `authed_user`. Refreshing is already
+        about one token and Slack puts the fields at the top level - verified
+        against the real endpoint, which answers `{"ok": true,
+        "access_token": ..., "refresh_token": ..., "expires_in": 43200,
+        "scope": ...}` with no `authed_user` anywhere in it.
+
+        Reading only the nested shape found nothing on every renewal and
+        reported it as Slack refusing the sign-in, which sent the user to sign
+        in again about twelve hours after they last did. The other two renewal
+        tests here script the nested shape, so they agreed with the bug instead
+        of catching it - which is why this one exists beside them rather than
+        replacing them: both shapes have to keep working.
+        """
+        account = self.account()
+        original = slack.oauth_call
+        slack.oauth_call = self.scripted({
+            "ok": True,
+            "access_token": "xoxe.xoxp-top",
+            "refresh_token": "xoxe-1-top",
+            "expires_in": 43200,
+            "token_type": "user",
+            "scope": "im:history,chat:write",
+        })
+        try:
+            fresh = slack.refreshed("work", account)
+        finally:
+            slack.oauth_call = original
+        self.assertEqual(fresh["token"], "xoxe.xoxp-top")
+        self.assertGreater(fresh["expiresAt"], time.time())
+        with open(slack.state_path("work")) as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk["token"], "xoxe.xoxp-top")
+        self.assertEqual(on_disk["refreshToken"], "xoxe-1-top")
+        self.assertEqual(on_disk["scopes"], "im:history,chat:write")
+
     def test_a_refusal_to_renew_asks_for_a_sign_in_rather_than_crashing(self):
         account = self.account()
         original = slack.oauth_call
@@ -2539,6 +2579,46 @@ class RotatingTokens(unittest.TestCase):
     def test_a_rotating_token_is_refused_when_pasted_and_taken_when_renewable(self):
         self.assertIn("rotates", slack.token_problem("xoxe.xoxp-1", "im:history"))
         self.assertEqual(slack.token_problem("xoxe.xoxp-1", "im:history", renewable=True), "")
+
+    def test_every_caller_of_token_problem_says_whether_it_can_renew(self):
+        """`renewable` defaulting to False is a trap, and one call site fell in it.
+
+        The browser flow stores an `xoxe.` access token beside the refresh
+        token that renews it - so a healthy browser sign-in is exactly the
+        shape `token_problem` refuses on its own. `fetch_account` asked
+        without saying it had a refresh token, so every poll of a browser
+        sign-in raised auth_required and advised the user to sign in through
+        the browser, which is what they had just done.
+
+        Testing the function is not enough here: it had a passing test the
+        whole time. What has to hold is that no caller forgets the argument,
+        which is a property of the call sites rather than of the function.
+        """
+        # The pasted-token path is the one caller right to leave it off: there
+        # is no refresh token anywhere in that flow, which is the whole point
+        # of the message it produces.
+        allowed_to_omit = {"cmd_login_set"}
+
+        tree = ast.parse(inspect.getsource(slack))
+        checked = 0
+        for outer in ast.walk(tree):
+            if not isinstance(outer, ast.FunctionDef):
+                continue
+            for node in ast.walk(outer):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "id", "") != "token_problem":
+                    continue
+                checked += 1
+                if outer.name in allowed_to_omit:
+                    continue
+                self.assertIn(
+                    "renewable", [kw.arg for kw in node.keywords],
+                    "%s() calls token_problem without saying whether it can renew"
+                    % outer.name)
+        # A rename or a refactor that leaves this test walking nothing would
+        # pass silently, which is the failure mode it exists to prevent.
+        self.assertGreaterEqual(checked, 3)
 
 
 if __name__ == "__main__":

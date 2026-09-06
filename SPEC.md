@@ -29,15 +29,60 @@ window.
 
 ### 1.1 Authentication
 
-A **user token** from a Slack app the user creates themselves. There is no
-device-code flow and no OAuth dance — `login-set` takes the token on stdin.
-`create-app` emits an app manifest (and `--dry-run` validates it).
+**Two ways in, and they store different things.**
+
+**Browser sign-in** (`login-url` → `login-wait`) — OAuth with **PKCE**, no client
+secret. `login-url` picks a free port from `REDIRECT_PORTS`, builds the
+authorization URL, and keeps the verifier back in a pending file;
+`login-wait` listens on **`127.0.0.1`** at `REDIRECT_PATH` (`/omarchy-slack`) for
+up to `SIGN_IN_TIMEOUT` (300 s) and stores what comes back. The listener is bound
+to loopback and not to every interface — a test asserts that, because what
+listens there hands an authorization code to whoever asks in the right shape.
+
+This stores a **rotating** pair: an `xoxe.` access token good for twelve hours
+and an `xoxe-` refresh token beside it.
+
+**Pasted token** (`login-set`) — a User OAuth Token from an app the user creates
+themselves, read as `{"token": …}` on stdin. `create-app` emits the app manifest
+(`--dry-run` validates it). This stores a static `xoxp-` token and **no** refresh
+token.
+
+`DEFAULT_CLIENT_ID` is currently `""`, so the browser flow needs
+`--client-id` naming an app of the user's own; without one it fails
+`no_client_id` and points at the paste route.
 
 **What the token may do is read back, not assumed.** Every response carries
 `x-oauth-scopes`; `remember_scopes` records them and the window says "this token
 cannot search" rather than offering a search that 403s. `WANTED_SCOPES` is the
 declared set, `CAPABILITIES` maps capability → scope, and `missing_scopes`
 reports the shortfall. **New capability ⇒ new scope check.**
+
+### 1.2 Token rotation
+
+A rotating refresh token **may be spent exactly once.** `refreshed()` renews when
+less than `REFRESH_MARGIN` (300 s) remains, and Slack hands back a *new* refresh
+token each time and retires the one just spent — so keeping the old one signs the
+account out at the next renewal.
+
+Because the plugin runs as several short-lived processes reading one file (a bar
+surface per monitor, plus the window), **two renewing at the same moment would
+spend the same refresh token twice**, and the second answer would be a refusal
+that leaves the account signed out with a token nobody can renew. So the renewal
+is taken under a **`RenewalSlot`** lock, and whoever waited **re-reads the file
+rather than renewing again**.
+
+Unlike `FetchSlot` (§2.4) this lock **waits rather than failing open**, because
+what it protects against is not a duplicated request but a spent refresh token —
+and it waits with a deadline (`WAIT` 20 s), because a process that died holding
+the lock must not sign the account out for good.
+
+**`token_problem(token, scopes, renewable=False)` must be told whether a refresh
+token exists.** The browser flow stores an `xoxe.` access token, which is exactly
+the shape `token_problem` refuses on its own — so a caller that forgets
+`renewable` rejects the healthiest accounts and advises the user to sign in
+through the browser, which is what they just did. `cmd_login_set` is the one
+caller right to omit it. A test walks every call site with `ast` and asserts the
+rest pass it.
 
 ---
 
@@ -176,6 +221,8 @@ something Slack has just been told that no search has run to confirm.
 
 | Command | Arguments |
 |---|---|
+| `login-url` | `--account`, `--client-id` — begins a browser sign-in; prints the URL to open |
+| `login-wait` | `--account`, `--timeout` (default 300) — waits for the browser, stores what it brings |
 | `login-set` | `--account`; reads `{"token": "xoxp-…"}` on **stdin** |
 | `login-status` | `--account` |
 | `create-app` | `--name`, `--dry-run` |

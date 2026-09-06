@@ -761,6 +761,44 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.9.4 — 2026-09-06
+
+**Updating from 0.9.0–0.9.3 fixes a browser sign-in by itself — but read the
+last bullet, because one part of this needs the shell restarted.**
+
+- **A browser sign-in stopped working after twelve hours, and said Slack had
+  refused it.** Renewing a rotating token asks for the `refresh_token` grant,
+  and Slack answers that one with the token at the top level — `authed_user`
+  is the shape of the *authorization code* exchange, which describes both the
+  app and the person and therefore has somewhere to nest it. The renewal read
+  only the nested shape, found nothing, and reported it as Slack refusing the
+  sign-in. So every browser sign-in was good for exactly one token lifetime
+  and then told the user to sign in again, which bought them another twelve
+  hours. Both shapes are read now. **Nothing needs doing: the next poll after
+  the update renews the token that is already on disk.** Signing in again
+  works too and is not wasted.
+
+- **Every poll of a browser sign-in was refused before it began.** The check
+  that tells a pasted rotating token apart from a renewable one is asked
+  whether a refresh token exists, and two of its four callers never said. A
+  browser sign-in stores exactly the token shape that check refuses on its
+  own, so the healthiest accounts were the ones it rejected — and the advice
+  it gave was to sign in through the browser, which is what had just been
+  done. A test now walks every call site rather than the function, because the
+  function had a passing test throughout.
+
+- **A dropdown with nothing unread said nothing at all.** The panel is a list
+  of what is waiting, so being caught up empties it — and an empty panel and a
+  panel that failed to load look identical. It says "Nothing unread." now. A
+  comment had claimed this note existed since the panel was written; it never
+  did.
+
+- **This last one needs a shell restart.** `omarchy plugin update` finishes
+  with `rescanPlugins`, which does not re-read a plugin's QML — the two fixes
+  above are in the Python helper, which is run afresh for every poll and so
+  takes effect on its own, but the dropdown's note will not appear until
+  `omarchy-restart-shell`.
+
 ### 0.9.3 — 2026-09-05
 
 - **The browser tab no longer congratulates you on a sign-in that failed.**

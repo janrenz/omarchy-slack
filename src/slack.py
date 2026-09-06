@@ -1618,7 +1618,14 @@ def fetch_account(alias, args):
     # A token stored before this check existed, or one whose app was changed
     # underneath it. auth_required rather than an error of its own, because the
     # way out is the same one: the window puts the token box back.
-    problem = token_problem(account.get("token"), account.get("scopes"))
+    #
+    # `renewable` has to be passed here, and forgetting it signs out exactly
+    # the accounts that are healthiest: the browser flow stores an `xoxe.`
+    # access token, which is the one shape token_problem refuses on its own,
+    # so every poll of a browser sign-in raised auth_required and told the user
+    # to sign in through the browser - which is what they had just done.
+    problem = token_problem(account.get("token"), account.get("scopes"),
+                            renewable=bool(account.get("refreshToken")))
     if problem:
         raise AccountError("auth_required", problem)
 
@@ -1633,7 +1640,8 @@ def fetch_account(alias, args):
             raise AccountError("auth_required", friendly(listing_problem))
         # missing_scope here means the token is not the one this needs, which
         # only the scopes can say - and they arrived with that very refusal.
-        unusable = token_problem(account.get("token"), api.scopes or account.get("scopes"))
+        unusable = token_problem(account.get("token"), api.scopes or account.get("scopes"),
+                                 renewable=bool(account.get("refreshToken")))
         if unusable:
             raise AccountError("auth_required", unusable)
         if listing_problem == "missing_scope":
@@ -4226,7 +4234,14 @@ def refreshed(alias, account):
             "grant_type": "refresh_token",
             "refresh_token": refresh,
         })
-        authed = payload.get("authed_user") or {}
+        # The two grants answer in two shapes, and only one of them nests.
+        # Exchanging an authorization code describes both the app and the
+        # person, so the user's token is under `authed_user`; refreshing is
+        # already about one token and Slack answers with the fields at the top
+        # level. Reading only the nested shape finds nothing on every renewal
+        # and reports it as Slack refusing the sign-in - which sends the user
+        # to sign in again roughly twelve hours after they last did.
+        authed = payload.get("authed_user") or payload
         token = str(authed.get("access_token") or "")
         if not token:
             raise AccountError("auth_required",
