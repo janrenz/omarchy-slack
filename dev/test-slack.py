@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2620,6 +2621,131 @@ class RotatingTokens(unittest.TestCase):
         # pass silently, which is the failure mode it exists to prevent.
         self.assertGreaterEqual(checked, 3)
 
+
+class SchemeRedirect(unittest.TestCase):
+    """The custom URI scheme: the redirect a distributed app is allowed to keep.
+
+    Slack's PKCE rules take a custom scheme as a desktop redirect always, and
+    it is not `http` - so the "redirect URLs must be https" rule a distributed
+    app is held to has nothing to object to, where there is no honest way to
+    put https in front of a loopback socket.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = self.dir
+        self.original_state = slack.STATE_DIR
+        slack.STATE_DIR = self.dir
+
+    def tearDown(self):
+        slack.STATE_DIR = self.original_state
+        if self.original_runtime is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self.original_runtime
+
+    def deliver(self, url, delay=0.3):
+        """What the desktop does: run the handler with the callback in argv."""
+        def send():
+            time.sleep(delay)
+            subprocess.run([slack.handler_path(), url], capture_output=True)
+        thread = threading.Thread(target=send)
+        thread.start()
+        return thread
+
+    def test_the_handler_carries_a_callback_to_the_waiting_sign_in(self):
+        thread = self.deliver("omarchy-slack://auth?code=CODE-1&state=STATE-1")
+        try:
+            got = slack.wait_for_scheme("STATE-1", timeout=10,
+                                        finish=lambda code: {"traded": code})
+        finally:
+            thread.join(10)
+        self.assertEqual(got, {"traded": "CODE-1"})
+
+    def test_a_callback_from_another_sign_in_is_not_taken(self):
+        """`state` is what says this redirect belongs to this sign-in.
+
+        A mismatch keeps waiting rather than failing, because the one that
+        matches may still be on its way - the same reason the loopback
+        listener keeps accepting.
+        """
+        wrong = self.deliver("omarchy-slack://auth?code=NO&state=SOMEBODY-ELSE", delay=0.2)
+        right = self.deliver("omarchy-slack://auth?code=YES&state=MINE", delay=0.8)
+        try:
+            got = slack.wait_for_scheme("MINE", timeout=10, finish=lambda code: code)
+        finally:
+            wrong.join(10)
+            right.join(10)
+        self.assertEqual(got, "YES")
+
+    def test_the_socket_is_private_while_it_exists_and_gone_afterwards(self):
+        seen = {}
+
+        def note(code):
+            path = slack.scheme_socket()
+            seen["mode"] = stat.S_IMODE(os.stat(path).st_mode)
+            seen["dir"] = stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode)
+            return code
+
+        thread = self.deliver("omarchy-slack://auth?code=C&state=S")
+        try:
+            slack.wait_for_scheme("S", timeout=10, finish=note)
+        finally:
+            thread.join(10)
+        # It carries an authorization code, so this user and nobody else.
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertEqual(seen["dir"], 0o700)
+        self.assertFalse(os.path.exists(slack.scheme_socket()))
+
+    def test_a_timeout_gives_up_rather_than_waiting_for_ever(self):
+        with self.assertRaises(slack.AccountError) as caught:
+            slack.wait_for_scheme("S", timeout=1, finish=lambda code: code)
+        self.assertEqual(caught.exception.code, "sign_in_timeout")
+
+    def test_a_registration_pointing_at_another_install_does_not_count(self):
+        """The case that looks exactly like Slack never coming back.
+
+        A desktop entry written by an install that has since moved still
+        answers `xdg-mime query`, and would launch a handler that is not
+        there. So the Exec line has to name this copy.
+        """
+        entry = slack.desktop_entry()
+        self.assertIn("Exec=%s " % slack.handler_path(), entry)
+        self.assertIn("x-scheme-handler/omarchy-slack", entry)
+
+        original = slack.desktop_path
+        moved = os.path.join(self.dir, "moved.desktop")
+        with open(moved, "w", encoding="utf-8") as handle:
+            handle.write(entry.replace(slack.handler_path(), "/somewhere/else/authcb"))
+        slack.desktop_path = lambda: moved
+        try:
+            self.assertFalse(slack.scheme_registered())
+        finally:
+            slack.desktop_path = original
+
+    def test_the_app_manifest_offers_the_scheme_and_keeps_the_ports(self):
+        """Both are registered, so the machine decides which is used.
+
+        The scheme is what a distributed app may keep; the ports are what a
+        machine with no handler - or a sandboxed browser that cannot see one -
+        still signs in through.
+        """
+        manifest = slack.app_manifest("Test")
+        urls = manifest["oauth_config"]["redirect_urls"]
+        self.assertEqual(urls[0], slack.SCHEME_REDIRECT)
+        for port in slack.REDIRECT_PORTS:
+            self.assertIn(slack.redirect_uri(port), urls)
+
+    def test_the_exchange_names_the_redirect_the_browser_was_sent_to(self):
+        """Slack matches `redirect_uri` on the exchange against the one on the
+        authorize URL, so the two halves cannot be built independently. The
+        pending file carries it rather than each end rebuilding it, which is
+        how they came to disagree when a second transport was added.
+        """
+        source = inspect.getsource(slack.cmd_login_wait)
+        self.assertIn('pending.get("redirect")', source)
+        self.assertIn('"redirect_uri": redirect', source)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

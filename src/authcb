@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Hand a Slack sign-in back to the process that is waiting for it.
+
+The desktop launches this with the whole callback URL as its one argument,
+because that is the only thing a custom URI scheme can deliver: there is no
+socket for the browser to connect to and no page for it to load, only a
+handler and an argv. So this exists to carry those few hundred characters
+across to `slack.py login-wait`, which is holding a unix socket open in
+$XDG_RUNTIME_DIR.
+
+It is deliberately the smallest thing that can do that. It holds no token,
+makes no network request, and reads nothing off disk - the authorization code
+it is carrying is worth nothing without the PKCE verifier, which never leaves
+the process that started the sign-in and is never sent here.
+
+Silence is the normal failure. A callback arriving with nothing waiting is a
+stale link somebody clicked twice, or a sign-in that has already timed out;
+neither is worth a dialog, and this has no way to raise one anyway. The exit
+code says which happened, for anyone running it by hand.
+"""
+
+import os
+import socket
+import sys
+
+SCHEME = "omarchy-slack"
+
+
+def main(argv):
+    if len(argv) < 2 or not argv[1].startswith(SCHEME + ":"):
+        sys.stderr.write("usage: authcb %s://auth?code=...&state=...\n" % SCHEME)
+        return 2
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime:
+        sys.stderr.write("omarchy-slack: no XDG_RUNTIME_DIR, so there is nowhere to deliver to\n")
+        return 3
+
+    path = os.path.join(runtime, SCHEME, "auth.sock")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(10)
+    try:
+        client.connect(path)
+        # One line, because that is what the other end reads. The URL cannot
+        # contain a newline - it came out of a browser's address handling.
+        client.sendall((argv[1] + "\n").encode("utf-8"))
+        client.shutdown(socket.SHUT_WR)
+    except OSError as error:
+        sys.stderr.write("omarchy-slack: no sign-in was waiting for this (%s)\n" % error)
+        return 4
+    finally:
+        client.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

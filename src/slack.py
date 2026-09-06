@@ -29,6 +29,7 @@ import re
 import secrets
 import socket
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -462,7 +463,16 @@ PLAIN_ENGLISH = {
     "invalid_grant": "Slack would not renew this sign-in. Sign in again.",
     "bad_client_id": "That Slack app id is not one Slack knows.",
     "invalid_client_id": "That Slack app id is not one Slack knows.",
-    "bad_redirect_uri": "Slack will not send a sign-in back to this machine: the app is missing the localhost redirect URL this plugin uses.",
+    # Two redirect URLs can be missing now rather than one, and which of them
+    # it is depends on something the user changed on this machine rather than
+    # on the app - so name both and say which one this sign-in tried. An app
+    # made before the scheme existed has only the ports, and registering the
+    # handler is what starts using a URL that app has never heard of.
+    "bad_redirect_uri": ("Slack will not send a sign-in back to this machine: the app is missing "
+                         "the redirect URL this sign-in used. An app made before this plugin "
+                         "offered the omarchy-slack:// handler carries only the three localhost "
+                         "URLs - add omarchy-slack://auth to it, or run `scheme-forget` to go "
+                         "back to the localhost route."),
     "invalid_code_verifier": "That sign-in could not prove it was the one that started. Start it again.",
     "invalid_scope": "The Slack app was not allowed to ask for one of the permissions this plugin needs.",
 }
@@ -3897,6 +3907,105 @@ def redirect_uri(port):
     return "http://localhost:%d%s" % (int(port), REDIRECT_PATH)
 
 
+# --------------------------------------------------------------------------
+# the custom URI scheme, and why it is the one to prefer
+#
+# Slack's PKCE rules take two kinds of desktop redirect: a `localhost` URL, and
+# a custom scheme - and a custom scheme is *always* a desktop redirect, where
+# localhost is one only because the app opted into PKCE. Two things follow, and
+# both are worth more than they sound:
+#
+#   - It is not `http`, so the "redirect URLs must be https" rule that a
+#     distributed app is held to has nothing to object to. There is no such
+#     thing as https to a loopback socket - no public CA will issue for
+#     localhost, and shipping a certificate in an open-source plugin publishes
+#     its private key - so this is the only route that satisfies that rule
+#     without putting somebody else's host in the middle of a sign-in.
+#   - Slack matches a redirect URL exactly, including the port, which is why
+#     the localhost path has to register three ports and try them in order.
+#     A scheme has no port. One URL, always the same one.
+#
+# The callback arrives as an argument to a handler the desktop launches, so it
+# needs a way back to the process that is waiting. That is a unix socket in
+# $XDG_RUNTIME_DIR rather than another loopback port: the runtime directory is
+# per-user and mode 0700, so what can reach the socket is this user and nobody
+# else, where a port on 127.0.0.1 is reachable by every process on the machine.
+# PKCE already makes a stolen code worthless without the verifier, so this is
+# the tidier shape rather than a hole being closed - but it is the tidier
+# shape, and it costs nothing.
+#
+# One thing is genuinely lost. On the localhost path the browser is still
+# holding a connection open while the token is traded, which is what lets the
+# tab say what actually happened. A scheme handoff leaves no tab to write to,
+# so the window is where the answer appears. That is a fair trade and not a
+# regression to fix: the window is where the person is going next anyway.
+# --------------------------------------------------------------------------
+
+SCHEME = "omarchy-slack"
+SCHEME_REDIRECT = SCHEME + "://auth"
+SCHEME_MIME = "x-scheme-handler/" + SCHEME
+SCHEME_DESKTOP = "omarchy-slack-auth.desktop"
+
+
+def handler_path():
+    """The callback handler that ships beside this file."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "authcb")
+
+
+def applications_dir():
+    base = (os.environ.get("XDG_DATA_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "share"))
+    return os.path.join(base, "applications")
+
+
+def desktop_path():
+    return os.path.join(applications_dir(), SCHEME_DESKTOP)
+
+
+def desktop_entry():
+    return ("[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Omarchy Slack sign-in\n"
+            "Comment=Receives the Slack sign-in that this machine started\n"
+            "NoDisplay=true\n"
+            "Exec=%s %%u\n"
+            "MimeType=%s;\n" % (handler_path(), SCHEME_MIME))
+
+
+def scheme_socket():
+    """Where the handler hands a callback back. "" with no runtime directory.
+
+    No fallback to shared temp: this socket carries an authorization code, and
+    a predictable path somewhere anybody can write is not the place for one.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    return os.path.join(runtime, SCHEME, "auth.sock") if runtime else ""
+
+
+def scheme_registered():
+    """Whether this install owns the scheme, and can prove it is still here.
+
+    Three things have to agree, and the third is the one that catches a real
+    case: a registration written by an install that has since been moved or
+    removed still answers `xdg-mime query`, and would send the callback to a
+    handler that is not there - which looks exactly like Slack never coming
+    back. So the Exec line has to name *this* copy.
+    """
+    try:
+        with open(desktop_path(), encoding="utf-8") as handle:
+            body = handle.read()
+    except OSError:
+        return False
+    if ("Exec=%s " % handler_path()) not in body:
+        return False
+    try:
+        answer = subprocess.run(["xdg-mime", "query", "default", SCHEME_MIME],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return answer.stdout.strip() == SCHEME_DESKTOP
+
+
 def pending_path(alias):
     problem = alias_problem(alias)
     if problem:
@@ -4105,6 +4214,174 @@ def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT, finish=None):
         server.close()
 
 
+def read_callback(conn, limit=8192):
+    """The one URL the handler sends, and nothing more."""
+    seen = b""
+    while b"\n" not in seen and len(seen) < limit:
+        try:
+            block = conn.recv(1024)
+        except (TimeoutError, OSError):
+            return ""
+        if not block:
+            break
+        seen += block
+    return seen.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+
+
+def wait_for_scheme(state, timeout=SIGN_IN_TIMEOUT, finish=None):
+    """What the scheme handler brings back, traded for a token.
+
+    The same shape as `wait_for_redirect` and for the same reasons - `state` is
+    compared in constant time before the code is looked at, and it keeps
+    accepting until the deadline rather than stopping at the first connection.
+    What it does not have is a browser to answer: the handler is a process that
+    delivers and exits, so there is nobody on the other end to show a page to.
+    """
+    path = scheme_socket()
+    if not path:
+        raise AccountError(
+            "no_runtime_dir",
+            "There is no XDG_RUNTIME_DIR on this machine, so there is nowhere private to "
+            "receive the sign-in. Sign in with the localhost redirect instead.")
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    except OSError as error:
+        raise AccountError("no_runtime_dir", "Could not make a place to receive the "
+                                             "sign-in: %s" % error)
+    # A socket left behind by a sign-in that was killed rather than finished.
+    # Removing it is safe because binding is what decides who is listening, and
+    # a live listener is caught by the bind below rather than by this.
+    if not os.path.exists(path) or not _socket_is_live(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(path)
+    except OSError:
+        server.close()
+        raise AccountError("sign_in_busy",
+                           "Another sign-in is already waiting for the browser to come back.")
+    try:
+        os.chmod(path, 0o600)
+        server.listen(1)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AccountError("sign_in_timeout",
+                                   "Nobody came back from Slack, so the sign-in was given up.")
+            server.settimeout(remaining)
+            try:
+                conn, _ = server.accept()
+            except (TimeoutError, OSError):
+                raise AccountError("sign_in_timeout",
+                                   "Nobody came back from Slack, so the sign-in was given up.")
+            with conn:
+                conn.settimeout(10)
+                target = read_callback(conn)
+            split = urllib.parse.urlsplit(target)
+            if split.scheme != SCHEME:
+                continue
+            query = urllib.parse.parse_qs(split.query)
+            refused = (query.get("error") or [""])[0]
+            if refused:
+                raise AccountError("denied", friendly(refused) if refused != "access_denied"
+                                   else "The sign-in was refused in the browser.")
+            came_back = (query.get("state") or [""])[0]
+            if not secrets.compare_digest(str(came_back), str(state)):
+                continue
+            code = (query.get("code") or [""])[0]
+            if not code:
+                continue
+            return code if finish is None else finish(code)
+    finally:
+        server.close()
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _socket_is_live(path):
+    """Whether something is actually listening on that socket file."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def cmd_scheme_status(_args):
+    out({
+        "ok": True,
+        "scheme": SCHEME,
+        "redirect": SCHEME_REDIRECT,
+        "registered": scheme_registered(),
+        "handler": handler_path(),
+        "desktopFile": desktop_path(),
+        "socket": scheme_socket(),
+    })
+
+
+def cmd_scheme_register(_args):
+    """Make this install the handler for the scheme, for this user only.
+
+    Nothing here needs root and nothing here is system-wide: the desktop entry
+    goes under the user's own data directory and `xdg-mime` writes the user's
+    own default. Removing it is `scheme-forget`.
+    """
+    handler = handler_path()
+    if not os.path.isfile(handler):
+        fail("no_handler", "The callback handler is missing from this install: %s" % handler)
+    if not os.access(handler, os.X_OK):
+        fail("no_handler", "The callback handler is not executable: %s" % handler)
+    try:
+        os.makedirs(applications_dir(), exist_ok=True)
+        with open(desktop_path(), "w", encoding="utf-8") as entry:
+            entry.write(desktop_entry())
+    except OSError as error:
+        fail("register_failed", "Could not write the desktop entry: %s" % error)
+
+    notes = []
+    for command in (["update-desktop-database", applications_dir()],
+                    ["xdg-mime", "default", SCHEME_DESKTOP, SCHEME_MIME]):
+        try:
+            done = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            if done.returncode != 0:
+                notes.append("%s said: %s" % (command[0], (done.stderr or "").strip()[:200]))
+        except FileNotFoundError:
+            # update-desktop-database is optional - the entry is still found
+            # without its cache. xdg-mime is not, and says so below.
+            notes.append("%s is not installed" % command[0])
+        except (OSError, subprocess.SubprocessError) as error:
+            notes.append("%s failed: %s" % (command[0], error))
+
+    registered = scheme_registered()
+    if not registered:
+        fail("register_failed",
+             "The desktop entry was written but the scheme is still not pointed at it. "
+             + ("  ".join(notes) if notes else ""),
+             notes=notes)
+    out({"ok": True, "registered": True, "redirect": SCHEME_REDIRECT,
+         "desktopFile": desktop_path(), "notes": notes})
+
+
+def cmd_scheme_forget(_args):
+    """Hand the scheme back. The sign-in falls back to the localhost port."""
+    try:
+        os.remove(desktop_path())
+    except OSError:
+        pass
+    out({"ok": True, "registered": scheme_registered(), "desktopFile": desktop_path()})
+
+
 def cmd_login_url(args):
     """Start a sign-in: the URL to open, and the secret kept back from it."""
     problem = alias_problem(args.account)
@@ -4115,11 +4392,29 @@ def cmd_login_url(args):
         fail("no_client_id",
              "This copy of the plugin has no Slack app to sign in through. Give it the client id "
              "of an app of your own, or paste a User OAuth Token instead.")
-    port = free_port()
-    if not port:
-        fail("no_port",
-             "Every port Slack is allowed to send you back to (%s) is in use on this machine."
-             % ", ".join(str(p) for p in REDIRECT_PORTS))
+    # The scheme when this install owns it, and the loopback port otherwise.
+    # Both are registered on the app, so which one is used is decided here on
+    # the machine rather than by what Slack will take - and a machine where the
+    # handler could not be registered, or where the browser cannot see it
+    # (a sandboxed one), still signs in.
+    wanted = str(getattr(args, "redirect", "") or "auto")
+    if wanted == "scheme" or (wanted == "auto" and scheme_registered() and scheme_socket()):
+        if not scheme_socket():
+            fail("no_runtime_dir",
+                 "There is no XDG_RUNTIME_DIR, so there is nowhere private to receive the "
+                 "sign-in. Use --redirect loopback.")
+        if wanted == "scheme" and not scheme_registered():
+            fail("scheme_not_registered",
+                 "Nothing on this machine opens %s yet. Run `scheme-register` first."
+                 % SCHEME_REDIRECT)
+        transport, port, redirect = "scheme", 0, SCHEME_REDIRECT
+    else:
+        port = free_port()
+        if not port:
+            fail("no_port",
+                 "Every port Slack is allowed to send you back to (%s) is in use on this machine."
+                 % ", ".join(str(p) for p in REDIRECT_PORTS))
+        transport, redirect = "loopback", redirect_uri(port)
 
     verifier, challenge = pkce_pair()
     state = secrets.token_urlsafe(24)
@@ -4128,6 +4423,8 @@ def cmd_login_url(args):
         "verifier": verifier,
         "state": state,
         "port": port,
+        "transport": transport,
+        "redirect": redirect,
         "startedAt": time.time(),
     }, private=True)
 
@@ -4136,12 +4433,13 @@ def cmd_login_url(args):
         # bot scopes, and this plugin has never wanted one.
         "user_scope": ",".join(WANTED_SCOPES),
         "client_id": client_id,
-        "redirect_uri": redirect_uri(port),
+        "redirect_uri": redirect,
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     })
-    out({"ok": True, "url": url, "port": port, "expiresIn": SIGN_IN_TIMEOUT})
+    out({"ok": True, "url": url, "port": port, "transport": transport,
+         "redirect": redirect, "expiresIn": SIGN_IN_TIMEOUT})
 
 
 def cmd_login_wait(args):
@@ -4150,18 +4448,26 @@ def cmd_login_wait(args):
     if not pending.get("verifier"):
         fail("no_sign_in", "No sign-in is waiting. Start one first.")
     port = int(pending.get("port") or 0)
+    transport = str(pending.get("transport") or "loopback")
+    # The exchange has to name the same redirect the browser was sent to, so
+    # it is read back from the pending file rather than rebuilt - rebuilding it
+    # is how the two halves come to disagree after a transport is added.
+    redirect = str(pending.get("redirect") or redirect_uri(port))
 
     def trade(code):
         return oauth_call({
             "client_id": str(pending.get("clientId") or ""),
             "code": code,
             "code_verifier": str(pending.get("verifier") or ""),
-            "redirect_uri": redirect_uri(port),
+            "redirect_uri": redirect,
         })
 
     try:
-        payload = wait_for_redirect(
-            port, str(pending.get("state") or ""), args.timeout, finish=trade)
+        state = str(pending.get("state") or "")
+        if transport == "scheme":
+            payload = wait_for_scheme(state, args.timeout, finish=trade)
+        else:
+            payload = wait_for_redirect(port, state, args.timeout, finish=trade)
     except AccountError as error:
         forget_pending(args.account)
         fail(error.code, error.message)
@@ -4346,7 +4652,12 @@ def app_manifest(name=APP_NAME):
             # turn PKCE on - that is a one-way switch on the app's own settings
             # page, and Slack keeps it out of the manifest for that reason -
             # but the redirect URLs it needs can be here waiting.
-            "redirect_urls": [redirect_uri(port) for port in REDIRECT_PORTS],
+            # The scheme first, because it is the one a distributed app is
+            # allowed to keep: it is not `http`, so the rule that a redirect
+            # URL must be `https` has nothing to say about it. The three ports
+            # stay for the machines the scheme cannot reach - no handler
+            # registered, or a sandboxed browser that cannot see one.
+            "redirect_urls": [SCHEME_REDIRECT] + [redirect_uri(port) for port in REDIRECT_PORTS],
         },
         "settings": {
             "org_deploy_enabled": False,
@@ -4697,7 +5008,19 @@ def main():
     login_url = with_account("login-url", "begin a browser sign-in; prints the URL to open")
     login_url.add_argument("--client-id", default="",
                            help="sign in through an app of your own instead of the shipped one")
+    login_url.add_argument("--redirect", default="auto", choices=("auto", "scheme", "loopback"),
+                           help="how Slack sends the browser back; auto prefers the "
+                                "%s:// handler when it is registered" % SCHEME)
     login_url.set_defaults(func=cmd_login_url)
+
+    sub.add_parser("scheme-status",
+                   help="whether this machine opens %s:// with this install" % SCHEME) \
+       .set_defaults(func=cmd_scheme_status)
+    sub.add_parser("scheme-register",
+                   help="make this install the handler for %s:// (this user only)" % SCHEME) \
+       .set_defaults(func=cmd_scheme_register)
+    sub.add_parser("scheme-forget", help="hand the scheme back; sign-in falls back to localhost") \
+       .set_defaults(func=cmd_scheme_forget)
 
     login_wait = with_account(
         "login-wait", "wait for the browser to come back, and store what it brings")

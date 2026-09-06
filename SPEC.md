@@ -32,12 +32,49 @@ window.
 **Two ways in, and they store different things.**
 
 **Browser sign-in** (`login-url` → `login-wait`) — OAuth with **PKCE**, no client
-secret. `login-url` picks a free port from `REDIRECT_PORTS`, builds the
-authorization URL, and keeps the verifier back in a pending file;
-`login-wait` listens on **`127.0.0.1`** at `REDIRECT_PATH` (`/omarchy-slack`) for
-up to `SIGN_IN_TIMEOUT` (300 s) and stores what comes back. The listener is bound
-to loopback and not to every interface — a test asserts that, because what
-listens there hands an authorization code to whoever asks in the right shape.
+secret, over one of **two redirect transports**. `login-url` chooses, records the
+choice and the exact redirect in the pending file, and `login-wait` waits on
+whichever was chosen for up to `SIGN_IN_TIMEOUT` (300 s).
+
+| Transport | Redirect | Delivery |
+|---|---|---|
+| `scheme` (preferred) | `omarchy-slack://auth` | The desktop launches `src/authcb`, which writes the callback to a unix socket at `$XDG_RUNTIME_DIR/omarchy-slack/auth.sock` (dir 0700, socket 0600) |
+| `loopback` (fallback) | `http://localhost:<port>/omarchy-slack` | A listener bound to **`127.0.0.1`** on the first free port of `REDIRECT_PORTS` |
+
+`--redirect auto|scheme|loopback` overrides the choice. `auto` takes the scheme
+only when `scheme_registered()` **and** a runtime directory exists, so a
+sandboxed browser, an unregistered handler, or a machine with no
+`XDG_RUNTIME_DIR` all still sign in.
+
+**Why the scheme is preferred.** Slack's PKCE rules take a custom URI scheme as a
+desktop redirect *always*, where `localhost` is one only because the app opted
+into PKCE. Two things follow: it is not `http`, so the "redirect URLs must be
+`https`" rule a distributed app is held to has nothing to object to — and there
+is no honest way to put `https` in front of a loopback socket, since no public CA
+issues for `localhost` and a certificate shipped in open source publishes its own
+key. And a scheme has no port, so the exact-match rule that forces
+`REDIRECT_PORTS` to exist stops applying.
+
+**What the scheme loses.** On the loopback path the browser holds a connection
+open while the token is traded, which is what lets the tab say what actually
+happened (0.9.3). A scheme handoff leaves no tab to write to, so the window is
+where the answer appears.
+
+**`scheme_registered()` requires three things to agree**, and the third catches
+the real case: the desktop entry exists, its `Exec` names *this* install's
+`authcb`, and `xdg-mime query default x-scheme-handler/omarchy-slack` returns it.
+A registration left by an install that has since moved still answers the query
+and would send the callback to a handler that is not there — which looks exactly
+like Slack never coming back.
+
+**The exchange names the redirect read back from the pending file**, never one
+rebuilt from the port. Slack matches `redirect_uri` on the exchange against the
+one on the authorize URL, so rebuilding it is how the two halves come to
+disagree once a second transport exists. A test asserts this.
+
+The loopback listener is bound to loopback and not to every interface — a test
+asserts that, because what listens there hands an authorization code to whoever
+asks in the right shape.
 
 This stores a **rotating** pair: an `xoxe.` access token good for twelve hours
 and an `xoxe-` refresh token beside it.
@@ -221,8 +258,11 @@ something Slack has just been told that no search has run to confirm.
 
 | Command | Arguments |
 |---|---|
-| `login-url` | `--account`, `--client-id` — begins a browser sign-in; prints the URL to open |
+| `login-url` | `--account`, `--client-id`, `--redirect {auto,scheme,loopback}` — begins a browser sign-in; prints the URL to open |
 | `login-wait` | `--account`, `--timeout` (default 300) — waits for the browser, stores what it brings |
+| `scheme-status` | — reports whether this install owns `omarchy-slack://` |
+| `scheme-register` | — writes the desktop entry and the `xdg-mime` default, for this user only |
+| `scheme-forget` | — removes it; sign-in falls back to loopback |
 | `login-set` | `--account`; reads `{"token": "xoxp-…"}` on **stdin** |
 | `login-status` | `--account` |
 | `create-app` | `--name`, `--dry-run` |

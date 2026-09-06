@@ -128,17 +128,53 @@ safe to ship:
 - **There is no client secret.** `oauth.v2.access` takes none for a public
   client — not an empty one, none. The client id in the source is an
   identifier, the way a username is.
-- **The browser comes back to `localhost`**, on a port this plugin holds only
+- **The browser comes back one of two ways**, and both are desktop redirects
+  under Slack's PKCE rules. Preferred is the `omarchy-slack://` scheme, which
+  the desktop hands to a small handler that carries the callback to the
+  waiting sign-in over a socket in your runtime directory — a directory only
+  you can read. The fallback is `localhost`, on a port this plugin holds only
   while a sign-in is in progress, bound to the loopback address and to nothing
-  else. It checks the `state` it started with before it looks at anything else
-  in the redirect, so a link from somewhere else cannot finish somebody's
-  sign-in for them.
+  else. Either way it checks the `state` it started with before it looks at
+  anything else in the redirect, so a link from somewhere else cannot finish
+  somebody's sign-in for them. See [The `omarchy-slack://`
+  handler](#the-omarchy-slack-handler).
 - **A desktop sign-in may not ask for bot scopes**, which suits a plugin that
   has never wanted one. It reads what you can read and posts as you.
 
 The token from this flow lasts twelve hours and is renewed from a refresh
 token that rotates with it. That happens on its own, before a poll that would
 otherwise fail; there is nothing to do about it and nothing to re-paste.
+
+### The `omarchy-slack://` handler
+
+Optional, and the sign-in falls back to `localhost` without it. Register it
+once:
+
+```bash
+python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-register
+python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-status
+```
+
+That writes one desktop entry under `~/.local/share/applications/` and points
+`xdg-mime` at it, for your user alone. Nothing needs root and nothing outside
+your home directory is touched. `scheme-forget` undoes it.
+
+Two reasons it is worth having:
+
+- **Slack matches a redirect URL exactly, including the port**, which is why
+  the `localhost` route has to register three ports and try them in turn. A
+  scheme has no port, so there is one URL and no port to be busy.
+- **It is not `http`.** Slack requires redirect URLs to be `https` for an app
+  that is distributed, and there is no honest way to put `https` in front of a
+  socket on your own machine — no public certificate authority will issue for
+  `localhost`, and a certificate shipped inside an open-source plugin publishes
+  its own private key. A custom scheme sidesteps the question rather than
+  working around it, and Slack's PKCE rules take one as a desktop redirect
+  always.
+
+It is not used when it cannot work: a browser in a sandbox that cannot see the
+handler, or a machine with no `XDG_RUNTIME_DIR`. Both fall back to the port,
+which is why both are registered on the app.
 
 ### Or an app of your own
 
@@ -164,6 +200,7 @@ browser flow is refused outright.
      description: Slack in the Omarchy bar
    oauth_config:
      redirect_urls:
+       - omarchy-slack://auth
        - http://localhost:45877/omarchy-slack
        - http://localhost:45878/omarchy-slack
        - http://localhost:45879/omarchy-slack
@@ -760,6 +797,51 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.9.5 — 2026-09-06
+
+**Nothing changes on update unless you ask for it.** The sign-in keeps using
+the `localhost` redirect until you register the handler below, and an app of
+your own that predates this release keeps working untouched.
+
+- **A sign-in can come back over `omarchy-slack://` instead of a port.**
+  Slack's PKCE rules take a custom URI scheme as a desktop redirect always,
+  and — unlike `localhost` — it is not `http`, so the rule that a distributed
+  app's redirect URLs must be `https` has nothing to object to. There is no
+  honest way to satisfy that rule with a loopback socket: no public
+  certificate authority will issue for `localhost`, and a certificate shipped
+  in an open-source plugin publishes its own private key. This is the way
+  round it that does not put somebody else's host in the middle of a sign-in.
+
+  It also drops the port problem. Slack matches a redirect URL exactly,
+  including the port, which is why the `localhost` route registers three and
+  tries them in turn; a scheme has no port.
+
+  `scheme-register` sets it up — one desktop entry under
+  `~/.local/share/applications/` and an `xdg-mime` default, for your user
+  alone, no root. `scheme-status` says whether it took, `scheme-forget` undoes
+  it. See [The `omarchy-slack://` handler](#the-omarchy-slack-handler).
+
+- **The callback travels over a socket in `$XDG_RUNTIME_DIR`, not a port.**
+  That directory is yours and mode 0700, so the socket is reachable by you and
+  by nothing else on the machine, where a port on 127.0.0.1 is reachable by
+  every process on it. PKCE already makes a stolen code worthless without the
+  verifier — which never leaves the process that started the sign-in — so this
+  is the tidier shape rather than a hole being closed. There is no fallback to
+  shared temp: a socket carrying an authorization code does not belong at a
+  predictable path anybody can write to.
+
+- **It is not used where it cannot work.** A browser in a sandbox that cannot
+  see the handler, a machine with no `XDG_RUNTIME_DIR`, a handler that was
+  never registered — each falls back to the `localhost` port, which is why
+  both URLs stay registered on the app. A registration left behind by an
+  install that has since moved does not count either: the desktop entry has to
+  name the handler that is actually there.
+
+- **If you register the handler against an app of your own, add
+  `omarchy-slack://auth` to it.** An app made before this release carries only
+  the three localhost URLs, and Slack refuses a redirect URL it does not know.
+  That refusal now says so in those words and names both ways out.
 
 ### 0.9.4 — 2026-09-06
 
