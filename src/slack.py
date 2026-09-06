@@ -8,10 +8,13 @@ people's messages should not also be the thing holding the credentials.
 
 Standard library only.
 
-There is no default client id and no OAuth redirect. Slack will not send a
-browser back to a desktop that has no https address to be sent to, so the
-sign-in is the one Slack itself offers for a personal integration: create an
-app, install it into your workspace, and paste the user token. What the token
+Signing in is a browser and PKCE, against an app that ships with the plugin -
+the client id is an identifier rather than a secret, which is what a public
+client means. Slack sends the browser back over the omarchy-slack:// scheme,
+because a redirect URL that is not https is what a Marketplace submission is
+refused over and there is no honest https route to a socket on this machine.
+Pasting a User OAuth Token is still here for a machine the scheme cannot reach.
+What the token
 may do is read back off the API rather than assumed - every response carries an
 `x-oauth-scopes` header naming what was actually granted - so the window can
 say "this token cannot search" rather than offering a search that 403s.
@@ -463,16 +466,13 @@ PLAIN_ENGLISH = {
     "invalid_grant": "Slack would not renew this sign-in. Sign in again.",
     "bad_client_id": "That Slack app id is not one Slack knows.",
     "invalid_client_id": "That Slack app id is not one Slack knows.",
-    # Two redirect URLs can be missing now rather than one, and which of them
-    # it is depends on something the user changed on this machine rather than
-    # on the app - so name both and say which one this sign-in tried. An app
-    # made before the scheme existed has only the ports, and registering the
-    # handler is what starts using a URL that app has never heard of.
-    "bad_redirect_uri": ("Slack will not send a sign-in back to this machine: the app is missing "
-                         "the redirect URL this sign-in used. An app made before this plugin "
-                         "offered the omarchy-slack:// handler carries only the three localhost "
-                         "URLs - add omarchy-slack://auth to it, or run `scheme-forget` to go "
-                         "back to the localhost route."),
+    # There is one redirect URL now, so there is one thing this can mean: the
+    # app being signed in through does not carry it. For an app of your own
+    # that is a page to visit; for the shipped one it should not happen.
+    "bad_redirect_uri": ("Slack will not send this sign-in back: the app does not have "
+                         "omarchy-slack://auth among its redirect URLs. Add it on the app's "
+                         "OAuth & Permissions page - it is only accepted once Advanced token "
+                         "security via PKCE is on, which is the switch above it."),
     "invalid_code_verifier": "That sign-in could not prove it was the one that started. Start it again.",
     "invalid_scope": "The Slack app was not allowed to ask for one of the permissions this plugin needs.",
 }
@@ -3887,14 +3887,6 @@ AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 # process that made it.
 DEFAULT_CLIENT_ID = "1200324068996.11957809212113"
 
-# Slack matches a redirect URL exactly, including the port, so the port cannot
-# be picked freshly at sign-in the way a loopback listener usually would. These
-# three are registered on the app and tried in order, which is enough for the
-# case that actually happens - something else on this machine already holds the
-# first one - without pretending to handle a machine where all three are taken.
-REDIRECT_PORTS = (45877, 45878, 45879)
-REDIRECT_PATH = "/omarchy-slack"
-
 # Long enough to find the browser window, read the permission list, and pick
 # the right workspace from the account switcher; short enough that a sign-in
 # nobody finished stops listening rather than holding a port until the shell
@@ -3907,42 +3899,51 @@ SIGN_IN_TIMEOUT = 300
 REFRESH_MARGIN = 300
 
 
-def redirect_uri(port):
-    return "http://localhost:%d%s" % (int(port), REDIRECT_PATH)
-
-
 # --------------------------------------------------------------------------
-# the custom URI scheme, and why it is the one to prefer
+# the custom URI scheme, and why it is the only way back
 #
-# Slack's PKCE rules take two kinds of desktop redirect: a `localhost` URL, and
-# a custom scheme - and a custom scheme is *always* a desktop redirect, where
-# localhost is one only because the app opted into PKCE. Two things follow, and
-# both are worth more than they sound:
+# Slack's PKCE rules take two kinds of desktop redirect: a `localhost` URL and
+# a custom scheme. This plugin used to register both and choose per machine.
+# It registers one now, and the reason is the Marketplace: an `http://` URL is
+# what a submission is refused over, and a listing is not a vanity item here -
+# the rate limits that shape this entire plugin are the ones a non-Marketplace
+# app gets. One `conversations.history` a minute is why the sidebar is built
+# out of a single search. So an app that cannot be submitted is an app that
+# stays slow for ever, and the localhost redirect was the thing standing
+# between the two.
 #
-#   - It is not `http`, so the "redirect URLs must be https" rule that a
-#     distributed app is held to has nothing to object to. There is no such
-#     thing as https to a loopback socket - no public CA will issue for
-#     localhost, and shipping a certificate in an open-source plugin publishes
-#     its private key - so this is the only route that satisfies that rule
-#     without putting somebody else's host in the middle of a sign-in.
-#   - Slack matches a redirect URL exactly, including the port, which is why
-#     the localhost path has to register three ports and try them in order.
-#     A scheme has no port. One URL, always the same one.
+# There is no https answer to reach for. No public CA will issue for
+# localhost, and a certificate shipped inside an open-source plugin publishes
+# its own private key; bouncing the callback through a host of ours would put
+# a third party in the middle of every sign-in and break the one-host rule
+# this plugin keeps everywhere else. A custom scheme is not `http` at all, so
+# the rule has nothing to object to - and it is *always* a desktop redirect,
+# where localhost is one only because the app opted into PKCE.
+#
+# It also has no port, which retires the three registered ports and the
+# tried-in-order dance they needed: Slack matches a redirect URL exactly,
+# including the port.
 #
 # The callback arrives as an argument to a handler the desktop launches, so it
 # needs a way back to the process that is waiting. That is a unix socket in
-# $XDG_RUNTIME_DIR rather than another loopback port: the runtime directory is
-# per-user and mode 0700, so what can reach the socket is this user and nobody
-# else, where a port on 127.0.0.1 is reachable by every process on the machine.
-# PKCE already makes a stolen code worthless without the verifier, so this is
-# the tidier shape rather than a hole being closed - but it is the tidier
-# shape, and it costs nothing.
+# $XDG_RUNTIME_DIR: the runtime directory is per-user and mode 0700, so what
+# can reach the socket is this user and nobody else - where a loopback port is
+# reachable by every process on the machine. PKCE already makes a stolen code
+# worthless without the verifier, so this is the tidier shape rather than a
+# hole being closed, but it is the tidier shape and it costs nothing.
 #
-# One thing is genuinely lost. On the localhost path the browser is still
-# holding a connection open while the token is traded, which is what lets the
-# tab say what actually happened. A scheme handoff leaves no tab to write to,
-# so the window is where the answer appears. That is a fair trade and not a
-# regression to fix: the window is where the person is going next anyway.
+# Two things are genuinely lost, and both are worth stating rather than
+# discovering:
+#
+#   - The browser used to hold a connection open while the token was traded,
+#     which is what let the tab say what actually happened. A scheme handoff
+#     leaves no tab to write to, so the window is where the answer appears.
+#     The window is where the person is going next anyway.
+#   - A machine where the scheme cannot work - no XDG_RUNTIME_DIR, or a
+#     sandboxed browser that cannot see a handler on the host - can no longer
+#     sign in through the browser at all. Pasting a User OAuth Token is what
+#     those machines have, and it is still here for exactly that reason.
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 
 SCHEME = "omarchy-slack"
@@ -4039,21 +4040,6 @@ def pkce_pair():
     return verifier, challenge
 
 
-def free_port():
-    """The first registered port nothing else is holding, or 0."""
-    for port in REDIRECT_PORTS:
-        probe = socket.socket()
-        try:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind(("127.0.0.1", port))
-            return port
-        except OSError:
-            continue
-        finally:
-            probe.close()
-    return 0
-
-
 def oauth_call(params):
     """oauth.v2.access, with no token and no client secret.
 
@@ -4088,136 +4074,6 @@ def oauth_call(params):
     return payload
 
 
-def read_request_target(conn, limit=8192):
-    """The path a browser asked for, off the request line and nothing more.
-
-    Only the first line is read, and only so much of it. Everything this needs
-    is in it, the sender is a browser on this machine rather than anybody who
-    should be trusted with an unbounded read, and a request that never sends a
-    newline is a hung sign-in rather than a wait forever.
-    """
-    seen = b""
-    while b"\r\n" not in seen and len(seen) < limit:
-        try:
-            block = conn.recv(1024)
-        except (TimeoutError, OSError):
-            return ""
-        if not block:
-            break
-        seen += block
-    line = seen.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-    parts = line.split(" ")
-    if len(parts) < 2 or parts[0] != "GET":
-        return ""
-    return parts[1]
-
-
-def answer(conn, status, message):
-    page = (
-        "<!doctype html><meta charset=utf-8>"
-        "<title>Omarchy Slack</title>"
-        "<body style='font:16px system-ui;margin:4rem auto;max-width:28rem'>"
-        "<p>%s</p></body>" % html_entities.escape(message)
-    ).encode("utf-8")
-    head = (
-        "HTTP/1.1 %s\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n\r\n" % (status, len(page))
-    ).encode("ascii")
-    try:
-        conn.sendall(head + page)
-    except OSError:
-        pass
-
-
-def wait_for_redirect(port, state, timeout=SIGN_IN_TIMEOUT, finish=None):
-    """What the browser brings back, traded for a token before it is answered.
-
-    `finish` is the trade. It runs while the browser is still waiting on this
-    connection, so that the page somebody is looking at says what actually
-    happened rather than what was about to be attempted: the tab is the only
-    place a person is looking at this point, and a tab that says "Signed in"
-    over a failed exchange is worse than no page at all. It was exactly that
-    for a while - the success page went out the moment the code arrived, and a
-    sign-in Slack refused still congratulated you.
-
-    Bound to 127.0.0.1 rather than to every interface, so what is listening
-    here is reachable from this machine and from nowhere else - this is a
-    socket that hands out an authorization code to whoever asks in the right
-    shape, and the shape is short.
-
-    It keeps accepting until the deadline rather than answering one connection
-    and stopping, because a browser sent to a page makes more requests than
-    the one: a favicon, a speculative preconnect, a second tab restored from
-    the last session. Answering the first of those and closing would end the
-    sign-in before the redirect ever arrived.
-
-    `state` is compared before the code is looked at, and compared in constant
-    time, because it is the check that says this redirect belongs to the
-    sign-in this process started rather than to one a page somewhere else
-    started on your behalf.
-    """
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        server.bind(("127.0.0.1", int(port)))
-    except OSError:
-        raise AccountError(
-            "port_taken",
-            "Something else is using port %d on this machine, which is where Slack was told "
-            "to send you back. Close it and sign in again." % int(port))
-    server.listen(1)
-    deadline = time.monotonic() + timeout
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise AccountError("sign_in_timeout",
-                                   "Nobody came back from Slack, so the sign-in was given up.")
-            server.settimeout(remaining)
-            try:
-                conn, _ = server.accept()
-            except (TimeoutError, OSError):
-                raise AccountError("sign_in_timeout",
-                                   "Nobody came back from Slack, so the sign-in was given up.")
-            with conn:
-                conn.settimeout(10)
-                target = read_request_target(conn)
-                split = urllib.parse.urlsplit(target)
-                if split.path != REDIRECT_PATH:
-                    answer(conn, "404 Not Found", "Nothing here.")
-                    continue
-                query = urllib.parse.parse_qs(split.query)
-                refused = (query.get("error") or [""])[0]
-                if refused:
-                    answer(conn, "200 OK", "Sign-in cancelled. You can close this tab.")
-                    raise AccountError("denied", friendly(refused) if refused != "access_denied"
-                                       else "The sign-in was refused in the browser.")
-                came_back = (query.get("state") or [""])[0]
-                if not secrets.compare_digest(str(came_back), str(state)):
-                    answer(conn, "400 Bad Request", "That sign-in was not the one this window started.")
-                    continue
-                code = (query.get("code") or [""])[0]
-                if not code:
-                    answer(conn, "400 Bad Request", "Slack sent no authorization code.")
-                    continue
-                if finish is None:
-                    answer(conn, "200 OK",
-                           "Signed in. You can close this tab and go back to Omarchy.")
-                    return code
-                try:
-                    finished = finish(code)
-                except AccountError as error:
-                    answer(conn, "200 OK", "Sign-in failed. " + error.message)
-                    raise
-                answer(conn, "200 OK",
-                       "Signed in. You can close this tab and go back to Omarchy.")
-                return finished
-    finally:
-        server.close()
-
-
 def read_callback(conn, limit=8192):
     """The one URL the handler sends, and nothing more."""
     seen = b""
@@ -4235,18 +4091,22 @@ def read_callback(conn, limit=8192):
 def wait_for_scheme(state, timeout=SIGN_IN_TIMEOUT, finish=None):
     """What the scheme handler brings back, traded for a token.
 
-    The same shape as `wait_for_redirect` and for the same reasons - `state` is
-    compared in constant time before the code is looked at, and it keeps
-    accepting until the deadline rather than stopping at the first connection.
-    What it does not have is a browser to answer: the handler is a process that
-    delivers and exits, so there is nobody on the other end to show a page to.
+    `state` is compared in constant time before the code is looked at, because
+    it is the check that says this callback belongs to the sign-in this process
+    started rather than to one a page somewhere else started on somebody's
+    behalf. It keeps accepting until the deadline rather than stopping at the
+    first connection, since a stale link clicked twice arrives here too.
+
+    There is no browser to answer: the handler is a process that delivers and
+    exits, so there is nobody on the other end to show a page to. The window
+    says how it went.
     """
     path = scheme_socket()
     if not path:
         raise AccountError(
             "no_runtime_dir",
             "There is no XDG_RUNTIME_DIR on this machine, so there is nowhere private to "
-            "receive the sign-in. Sign in with the localhost redirect instead.")
+            "receive the sign-in. Paste a User OAuth Token instead.")
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     except OSError as error:
@@ -4334,24 +4194,31 @@ def cmd_scheme_status(_args):
     })
 
 
-def cmd_scheme_register(_args):
+def capture_register():
     """Make this install the handler for the scheme, for this user only.
 
     Nothing here needs root and nothing here is system-wide: the desktop entry
     goes under the user's own data directory and `xdg-mime` writes the user's
     own default. Removing it is `scheme-forget`.
+
+    Raises rather than printing, because a sign-in calls this on its way past
+    and a helper command prints exactly one JSON object - two `out()` calls in
+    one run is the shape that made a draft get sent twice in the mail plugin.
     """
     handler = handler_path()
     if not os.path.isfile(handler):
-        fail("no_handler", "The callback handler is missing from this install: %s" % handler)
+        raise AccountError("no_handler",
+                           "The callback handler is missing from this install: %s" % handler)
     if not os.access(handler, os.X_OK):
-        fail("no_handler", "The callback handler is not executable: %s" % handler)
+        raise AccountError("no_handler",
+                           "The callback handler is not executable: %s" % handler)
     try:
         os.makedirs(applications_dir(), exist_ok=True)
         with open(desktop_path(), "w", encoding="utf-8") as entry:
             entry.write(desktop_entry())
     except OSError as error:
-        fail("register_failed", "Could not write the desktop entry: %s" % error)
+        raise AccountError("register_failed",
+                           "Could not write the desktop entry: %s" % error)
 
     notes = []
     for command in (["update-desktop-database", applications_dir()],
@@ -4367,18 +4234,25 @@ def cmd_scheme_register(_args):
         except (OSError, subprocess.SubprocessError) as error:
             notes.append("%s failed: %s" % (command[0], error))
 
-    registered = scheme_registered()
-    if not registered:
-        fail("register_failed",
-             "The desktop entry was written but the scheme is still not pointed at it. "
-             + ("  ".join(notes) if notes else ""),
-             notes=notes)
+    if not scheme_registered():
+        raise AccountError(
+            "register_failed",
+            "The desktop entry was written but the scheme is still not pointed at it. "
+            + ("  ".join(notes) if notes else ""))
+    return notes
+
+
+def cmd_scheme_register(_args):
+    try:
+        notes = capture_register()
+    except AccountError as error:
+        fail(error.code, error.message)
     out({"ok": True, "registered": True, "redirect": SCHEME_REDIRECT,
          "desktopFile": desktop_path(), "notes": notes})
 
 
 def cmd_scheme_forget(_args):
-    """Hand the scheme back. The sign-in falls back to the localhost port."""
+    """Hand the scheme back. The browser sign-in cannot work without it."""
     try:
         os.remove(desktop_path())
     except OSError:
@@ -4396,29 +4270,30 @@ def cmd_login_url(args):
         fail("no_client_id",
              "This copy of the plugin has no Slack app to sign in through. Give it the client id "
              "of an app of your own, or paste a User OAuth Token instead.")
-    # The scheme when this install owns it, and the loopback port otherwise.
-    # Both are registered on the app, so which one is used is decided here on
-    # the machine rather than by what Slack will take - and a machine where the
-    # handler could not be registered, or where the browser cannot see it
-    # (a sandboxed one), still signs in.
-    wanted = str(getattr(args, "redirect", "") or "auto")
-    if wanted == "scheme" or (wanted == "auto" and scheme_registered() and scheme_socket()):
-        if not scheme_socket():
-            fail("no_runtime_dir",
-                 "There is no XDG_RUNTIME_DIR, so there is nowhere private to receive the "
-                 "sign-in. Use --redirect loopback.")
-        if wanted == "scheme" and not scheme_registered():
+    # The scheme is the only way back now, so this is where it gets set up
+    # rather than somewhere the user is told to go and run a command. The app
+    # carries no `http://localhost` redirect URL at all: those are what a
+    # Marketplace submission is refused over, and an app that cannot be
+    # submitted is one that stays under the rate limits that shape this whole
+    # plugin. So there is nothing to fall back *to*, and the honest thing is to
+    # make the one route work rather than to offer a choice that is not one.
+    if not scheme_socket():
+        fail("no_runtime_dir",
+             "There is no XDG_RUNTIME_DIR on this machine, so there is nowhere private for "
+             "Slack's answer to arrive. Paste a User OAuth Token instead.")
+    if not scheme_registered():
+        if getattr(args, "register", True) is False:
             fail("scheme_not_registered",
-                 "Nothing on this machine opens %s yet. Run `scheme-register` first."
-                 % SCHEME_REDIRECT)
-        transport, port, redirect = "scheme", 0, SCHEME_REDIRECT
-    else:
-        port = free_port()
-        if not port:
-            fail("no_port",
-                 "Every port Slack is allowed to send you back to (%s) is in use on this machine."
-                 % ", ".join(str(p) for p in REDIRECT_PORTS))
-        transport, redirect = "loopback", redirect_uri(port)
+                 "Nothing on this machine opens %s yet, and --no-register said not to set it "
+                 "up. Run `scheme-register` first." % SCHEME_REDIRECT)
+        # Registering is a desktop entry under the user's own data directory
+        # and an xdg-mime default for a scheme nothing else claims. It is not a
+        # decision worth stopping a sign-in over, and stopping to ask would be
+        # handing somebody off to a terminal in the middle of pressing a button.
+        try:
+            capture_register()
+        except AccountError as error:
+            fail(error.code, error.message)
 
     verifier, challenge = pkce_pair()
     state = secrets.token_urlsafe(24)
@@ -4426,11 +4301,11 @@ def cmd_login_url(args):
         "clientId": client_id,
         "verifier": verifier,
         "state": state,
-        "port": port,
-        "transport": transport,
-        "redirect": redirect,
+        "transport": "scheme",
+        "redirect": SCHEME_REDIRECT,
         "startedAt": time.time(),
     }, private=True)
+    redirect = SCHEME_REDIRECT
 
     url = AUTHORIZE_URL + "?" + urllib.parse.urlencode({
         # user_scope alone, and no `scope`: a desktop redirect may not ask for
@@ -4442,7 +4317,7 @@ def cmd_login_url(args):
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     })
-    out({"ok": True, "url": url, "port": port, "transport": transport,
+    out({"ok": True, "url": url, "transport": "scheme",
          "redirect": redirect, "expiresIn": SIGN_IN_TIMEOUT})
 
 
@@ -4451,12 +4326,9 @@ def cmd_login_wait(args):
     pending = read_json(pending_path(args.account)) or {}
     if not pending.get("verifier"):
         fail("no_sign_in", "No sign-in is waiting. Start one first.")
-    port = int(pending.get("port") or 0)
-    transport = str(pending.get("transport") or "loopback")
     # The exchange has to name the same redirect the browser was sent to, so
-    # it is read back from the pending file rather than rebuilt - rebuilding it
-    # is how the two halves come to disagree after a transport is added.
-    redirect = str(pending.get("redirect") or redirect_uri(port))
+    # it is read back from the pending file rather than rebuilt.
+    redirect = str(pending.get("redirect") or SCHEME_REDIRECT)
 
     def trade(code):
         return oauth_call({
@@ -4467,11 +4339,7 @@ def cmd_login_wait(args):
         })
 
     try:
-        state = str(pending.get("state") or "")
-        if transport == "scheme":
-            payload = wait_for_scheme(state, args.timeout, finish=trade)
-        else:
-            payload = wait_for_redirect(port, state, args.timeout, finish=trade)
+        payload = wait_for_scheme(str(pending.get("state") or ""), args.timeout, finish=trade)
     except AccountError as error:
         forget_pending(args.account)
         fail(error.code, error.message)
@@ -4640,7 +4508,7 @@ APP_NAME = "Omarchy Slack"
 APP_DESCRIPTION = "Slack channels, DMs and threads in the Omarchy bar"
 
 
-def app_manifest(name=APP_NAME, scheme=False):
+def app_manifest(name=APP_NAME):
     """The app this plugin wants, built from the scope list above.
 
     One list, not two: a manifest in the README that drifts from what the code
@@ -4667,8 +4535,19 @@ def app_manifest(name=APP_NAME, scheme=False):
             # page, and Slack keeps it out of the manifest for that reason -
             # but the redirect URLs it needs can be here waiting. All but one:
             # see `scheme` above for why that one cannot be here yet.
-            "redirect_urls": ([redirect_uri(port) for port in REDIRECT_PORTS]
-                              + ([SCHEME_REDIRECT] if scheme else [])),
+            # No redirect URL at all, and that is the only shape that works
+            # at creation. An app being created has PKCE off - a manifest
+            # cannot turn it on, which is why the switch is on the settings
+            # page - and Slack refuses a custom URI scheme from an app that is
+            # not a PKCE public client, so naming the scheme here is rejected
+            # at the one moment nothing can be done about it. An `http://`
+            # redirect would be accepted and is exactly what a Marketplace
+            # submission is refused over, so it is not the way out either.
+            #
+            # Nothing is lost: an app made this way is installed from its own
+            # page and its User OAuth Token pasted, and that route uses no
+            # redirect. Turning PKCE on and adding omarchy-slack://auth is
+            # what upgrades it to the browser sign-in, in that order.
         },
         "settings": {
             "org_deploy_enabled": False,
@@ -5023,9 +4902,9 @@ def main():
     login_url = with_account("login-url", "begin a browser sign-in; prints the URL to open")
     login_url.add_argument("--client-id", default="",
                            help="sign in through an app of your own instead of the shipped one")
-    login_url.add_argument("--redirect", default="auto", choices=("auto", "scheme", "loopback"),
-                           help="how Slack sends the browser back; auto prefers the "
-                                "%s:// handler when it is registered" % SCHEME)
+    login_url.add_argument("--no-register", dest="register", action="store_false", default=True,
+                           help="refuse rather than setting up the %s:// handler if it is "
+                                "not registered yet" % SCHEME)
     login_url.set_defaults(func=cmd_login_url)
 
     sub.add_parser("scheme-status",
@@ -5034,7 +4913,7 @@ def main():
     sub.add_parser("scheme-register",
                    help="make this install the handler for %s:// (this user only)" % SCHEME) \
        .set_defaults(func=cmd_scheme_register)
-    sub.add_parser("scheme-forget", help="hand the scheme back; sign-in falls back to localhost") \
+    sub.add_parser("scheme-forget", help="hand the scheme back; the browser sign-in stops working") \
        .set_defaults(func=cmd_scheme_forget)
 
     login_wait = with_account(

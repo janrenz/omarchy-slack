@@ -2339,108 +2339,6 @@ class BrowserSignIn(unittest.TestCase):
         answer = capture(slack.cmd_login_wait, args)
         self.assertEqual(answer["error"]["code"], "no_sign_in")
 
-    # -- the socket the browser comes back to -----------------------------
-
-    def visit(self, port, path, delay=0.05):
-        """Ask the loopback listener for a path, the way a browser would."""
-        def go():
-            time.sleep(delay)
-            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
-            try:
-                conn.sendall(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
-                conn.recv(4096)
-            finally:
-                conn.close()
-        thread = threading.Thread(target=go, daemon=True)
-        thread.start()
-        return thread
-
-    def test_the_code_comes_back_off_the_redirect(self):
-        port = slack.free_port()
-        self.visit(port, slack.REDIRECT_PATH + "?code=abc123&state=thestate")
-        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "abc123")
-
-    def test_a_favicon_does_not_end_the_sign_in(self):
-        """A browser asks for more than the page it was sent to.
-
-        Answering the first connection and stopping would end the sign-in
-        before the redirect arrived - which is the whole reason this listens
-        in a loop rather than accepting once.
-        """
-        port = slack.free_port()
-        self.visit(port, "/favicon.ico")
-        self.visit(port, slack.REDIRECT_PATH + "?code=late&state=thestate", delay=0.3)
-        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "late")
-
-    def test_a_redirect_carrying_somebody_elses_state_is_not_taken(self):
-        port = slack.free_port()
-        self.visit(port, slack.REDIRECT_PATH + "?code=stolen&state=wrong")
-        self.visit(port, slack.REDIRECT_PATH + "?code=ours&state=thestate", delay=0.3)
-        self.assertEqual(slack.wait_for_redirect(port, "thestate", timeout=5), "ours")
-
-    def test_the_tab_is_told_the_exchange_failed_rather_than_congratulated(self):
-        """The tab is the only place anybody is looking when this goes wrong.
-
-        The success page used to go out the moment the code arrived, before
-        the token exchange had been tried - so a sign-in Slack refused still
-        said "Signed in" in the browser while the window stayed signed out.
-        """
-        port = slack.free_port()
-        seen = []
-
-        def go():
-            time.sleep(0.05)
-            conn = socket.create_connection(("127.0.0.1", port), timeout=5)
-            try:
-                conn.sendall(("GET %s?code=c&state=s HTTP/1.1\r\nHost: localhost\r\n\r\n"
-                              % slack.REDIRECT_PATH).encode())
-                seen.append(conn.recv(4096).decode("utf-8", "replace"))
-            finally:
-                conn.close()
-        thread = threading.Thread(target=go, daemon=True)
-        thread.start()
-
-        def refuse(code):
-            raise slack.AccountError("exchange_failed", "Slack would not have it.")
-
-        with self.assertRaises(slack.AccountError):
-            slack.wait_for_redirect(port, "s", timeout=5, finish=refuse)
-        thread.join(timeout=5)
-        self.assertIn("Slack would not have it.", seen[0])
-        self.assertNotIn("Signed in", seen[0])
-
-    def test_what_the_exchange_returned_is_what_comes_back(self):
-        port = slack.free_port()
-        self.visit(port, slack.REDIRECT_PATH + "?code=thecode&state=s")
-        got = slack.wait_for_redirect(port, "s", timeout=5,
-                                      finish=lambda code: {"traded": code})
-        self.assertEqual(got, {"traded": "thecode"})
-
-    def test_a_refusal_in_the_browser_comes_back_as_one(self):
-        port = slack.free_port()
-        self.visit(port, slack.REDIRECT_PATH + "?error=access_denied&state=thestate")
-        with self.assertRaises(slack.AccountError) as caught:
-            slack.wait_for_redirect(port, "thestate", timeout=5)
-        self.assertEqual(caught.exception.code, "denied")
-
-    def test_nobody_coming_back_gives_up_rather_than_waiting_for_ever(self):
-        port = slack.free_port()
-        started = time.monotonic()
-        with self.assertRaises(slack.AccountError) as caught:
-            slack.wait_for_redirect(port, "thestate", timeout=1)
-        self.assertEqual(caught.exception.code, "sign_in_timeout")
-        self.assertLess(time.monotonic() - started, 5)
-
-    def test_the_listener_is_not_reachable_from_off_this_machine(self):
-        """Bound to the loopback address, not to every interface.
-
-        What listens here hands an authorization code to whoever asks in the
-        right shape, so the set of people who can ask matters.
-        """
-        source = inspect.getsource(slack.wait_for_redirect)
-        self.assertIn('"127.0.0.1"', source)
-        self.assertNotIn('"0.0.0.0"', source)
-
 
 class RotatingTokens(unittest.TestCase):
     """A token that expires, and the refresh token that is spent to renew it."""
@@ -2747,31 +2645,83 @@ class SchemeRedirect(unittest.TestCase):
         finally:
             slack.desktop_path = original
 
-    def test_a_new_app_is_not_asked_to_take_the_scheme_yet(self):
-        """Slack refuses a custom scheme from an app that is not a PKCE client.
+    def test_a_new_app_is_created_with_no_redirect_url_at_all(self):
+        """The only shape Slack will accept at creation.
 
-        "We will reject any custom URI schemes if PKCE parameters are not
-        used" - and PKCE cannot be turned on in a manifest, because it is a
-        one-way switch on the app's own settings page. So an app being created
-        has PKCE off by definition, and a manifest carrying the scheme would be
-        refused at the moment it is least useful. This is the ordering the
-        README documents, kept honest here.
+        A custom scheme is refused from an app that is not yet a PKCE public
+        client, and PKCE cannot be turned on in a manifest. An `http://` URL
+        would be accepted and is exactly what a Marketplace submission is
+        refused over. So neither belongs here - and an app made this way is
+        installed from its own page and its token pasted, which uses no
+        redirect at all.
         """
-        urls = slack.app_manifest("Test")["oauth_config"]["redirect_urls"]
-        self.assertNotIn(slack.SCHEME_REDIRECT, urls)
-        for port in slack.REDIRECT_PORTS:
-            self.assertIn(slack.redirect_uri(port), urls)
+        oauth = slack.app_manifest("Test")["oauth_config"]
+        self.assertNotIn("redirect_urls", oauth)
+        self.assertTrue(oauth["scopes"]["user"])
 
-    def test_an_app_that_already_has_pkce_can_be_given_the_scheme(self):
-        """Both are registered then, so the machine decides which is used.
+    def test_no_http_redirect_survives_anywhere_in_the_helper(self):
+        """The localhost route is gone, not merely unused.
 
-        The ports are what a machine with no handler - or a sandboxed browser
-        that cannot see one - still signs in through.
+        A submission is refused over an `http://` redirect URL, so one left
+        lying in a constant to be picked up later is a trap rather than a
+        spare.
         """
-        urls = slack.app_manifest("Test", scheme=True)["oauth_config"]["redirect_urls"]
-        self.assertIn(slack.SCHEME_REDIRECT, urls)
-        for port in slack.REDIRECT_PORTS:
-            self.assertIn(slack.redirect_uri(port), urls)
+        tree = ast.parse(open(slack.__file__, encoding="utf-8").read())
+        # String constants only: the comments explaining why the route is gone
+        # are supposed to say "localhost", and a grep cannot tell those from a
+        # URL waiting to be used.
+        literals = [n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        offenders = [s for s in literals if "http://localhost" in s]
+        self.assertEqual(offenders, [])
+        self.assertEqual(slack.SCHEME_REDIRECT, "omarchy-slack://auth")
+
+    def test_a_refusal_in_the_browser_comes_back_as_one(self):
+        """Pressing Cancel on Slack's page is an answer, not a timeout."""
+        thread = self.deliver("omarchy-slack://auth?error=access_denied&state=S")
+        try:
+            with self.assertRaises(slack.AccountError) as caught:
+                slack.wait_for_scheme("S", timeout=10, finish=lambda code: code)
+        finally:
+            thread.join(10)
+        self.assertEqual(caught.exception.code, "denied")
+
+    def test_a_sign_in_sets_the_handler_up_rather_than_sending_you_to_a_terminal(self):
+        """The scheme is the only way back, so registering is part of signing in.
+
+        Stopping to say "now run this command" in the middle of pressing a
+        button is exactly the handing-off this plugin does not do. It is a
+        desktop entry under the user's own data directory and an xdg-mime
+        default for a scheme nothing else claims - not a decision worth
+        interrupting for.
+        """
+        calls = []
+        was_registered, was_register = slack.scheme_registered, slack.capture_register
+        slack.scheme_registered = lambda: bool(calls)
+        slack.capture_register = lambda: calls.append(True) or []
+        try:
+            args = Args()
+            args.client_id = "111.222"
+            args.register = True
+            answer = capture(slack.cmd_login_url, args)
+        finally:
+            slack.scheme_registered, slack.capture_register = was_registered, was_register
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(answer["redirect"], slack.SCHEME_REDIRECT)
+
+    def test_no_register_refuses_instead_of_setting_it_up(self):
+        was = slack.scheme_registered
+        slack.scheme_registered = lambda: False
+        try:
+            args = Args()
+            args.client_id = "111.222"
+            args.register = False
+            answer = capture(slack.cmd_login_url, args)
+        finally:
+            slack.scheme_registered = was
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["error"]["code"], "scheme_not_registered")
 
     def test_the_exchange_names_the_redirect_the_browser_was_sent_to(self):
         """Slack matches `redirect_uri` on the exchange against the one on the

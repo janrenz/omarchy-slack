@@ -129,16 +129,13 @@ safe to ship:
 - **There is no client secret.** `oauth.v2.access` takes none for a public
   client — not an empty one, none. The client id in the source is an
   identifier, the way a username is.
-- **The browser comes back one of two ways**, and both are desktop redirects
-  under Slack's PKCE rules. Preferred is the `omarchy-slack://` scheme, which
-  the desktop hands to a small handler that carries the callback to the
-  waiting sign-in over a socket in your runtime directory — a directory only
-  you can read. The fallback is `localhost`, on a port this plugin holds only
-  while a sign-in is in progress, bound to the loopback address and to nothing
-  else. Either way it checks the `state` it started with before it looks at
-  anything else in the redirect, so a link from somewhere else cannot finish
-  somebody's sign-in for them. See [The `omarchy-slack://`
-  handler](#the-omarchy-slack-handler).
+- **The browser comes back over `omarchy-slack://`**, which the desktop hands
+  to a small handler that carries the callback to the waiting sign-in over a
+  socket in your runtime directory — a directory only you can read. It checks
+  the `state` it started with before it looks at anything else, so a link from
+  somewhere else cannot finish somebody's sign-in for them. Setting the
+  handler up happens as part of signing in; there is nothing to run first.
+  See [The `omarchy-slack://` handler](#the-omarchy-slack-handler).
 - **A desktop sign-in may not ask for bot scopes**, which suits a plugin that
   has never wanted one. It reads what you can read and posts as you.
 
@@ -157,56 +154,58 @@ away asks you to sign in again, and says so rather than failing quietly.
 
 ### The `omarchy-slack://` handler
 
-Optional, and the sign-in falls back to `localhost` without it. Register it
-once:
+**This is the only way the browser comes back**, and it is set up as part of
+the first sign-in — one desktop entry under `~/.local/share/applications/` and
+an `xdg-mime` default, for your user alone. Nothing needs root and nothing
+outside your home directory is touched. To do it by hand, or to check:
 
 ```bash
-python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-register
 python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-status
+python3 ~/.config/omarchy/plugins/janrenz.omarchy.slack/src/slack.py scheme-register
 ```
 
-**If you are signing in through an app of your own, turn PKCE on before you add
-this URL to it, and in that order.** Slack refuses a custom URI scheme from an
-app that is not a PKCE public client — *"we will reject any custom URI schemes
-if PKCE parameters are not used"* — and it refuses it in the Redirect URLs
-field, where the message is the generic **"A valid URL must be entered"** and
-says nothing about PKCE. The switch is **Settings → OAuth & Permissions →
-Advanced token security via PKCE**, Slack makes it one-way, and the field
-accepts `omarchy-slack://auth` once it is on. This is also why the manifest
-below carries only the three `localhost` URLs: an app being created has PKCE
-off by definition, so a manifest naming the scheme would be rejected at the one
-moment you cannot do anything about it.
+`scheme-forget` hands the scheme back.
 
-That writes one desktop entry under `~/.local/share/applications/` and points
-`xdg-mime` at it, for your user alone. Nothing needs root and nothing outside
-your home directory is touched. `scheme-forget` undoes it.
+**Why there is no `http://localhost` fallback any more.** There was one, and it
+was removed rather than kept. An `http://` redirect URL is what a Slack
+Marketplace submission is refused over, and the listing is not a vanity item:
+the rate limits this entire plugin is shaped around — one
+`conversations.history` a minute — are the ones a *non*-Marketplace app gets.
+So an app that cannot be submitted is an app that stays slow for ever, and the
+localhost redirect was the thing standing between the two.
 
-Two reasons it is worth having:
+There is no `https` answer to reach for either. No public certificate authority
+will issue for `localhost`, a certificate shipped inside an open-source plugin
+publishes its own private key, and bouncing the callback through a host of ours
+would put a third party in the middle of every sign-in. A custom scheme is not
+`http` at all, so the rule has nothing to object to — and under Slack's PKCE
+rules it is *always* a desktop redirect, where `localhost` is one only because
+the app opted into PKCE. It has no port either, which retires the three
+registered ports the old route needed, since Slack matches a redirect URL
+exactly including the port.
 
-- **Slack matches a redirect URL exactly, including the port**, which is why
-  the `localhost` route has to register three ports and try them in turn. A
-  scheme has no port, so there is one URL and no port to be busy.
-- **It is not `http`.** Slack requires redirect URLs to be `https` for an app
-  that is distributed, and there is no honest way to put `https` in front of a
-  socket on your own machine — no public certificate authority will issue for
-  `localhost`, and a certificate shipped inside an open-source plugin publishes
-  its own private key. A custom scheme sidesteps the question rather than
-  working around it, and Slack's PKCE rules take one as a desktop redirect
-  always.
-
-It is not used when it cannot work: a browser in a sandbox that cannot see the
-handler, or a machine with no `XDG_RUNTIME_DIR`. Both fall back to the port,
-which is why both are registered on the app.
+**Where it cannot work, paste a token instead.** A machine with no
+`XDG_RUNTIME_DIR`, or a browser in a sandbox that cannot see a handler on the
+host, can no longer use the browser sign-in at all. That is what
+[Or paste a token](#or-paste-a-token) is for, and it is the reason that route
+is still here.
 
 ### Or an app of your own
 
 A workspace that would rather be its own app — for its admins' own audit
 trail, or because it does not allow this one — puts that app's **client id**
 into the plugin's settings, and the browser sign-in above uses it instead.
-The client id is on the app's Basic Information page. For PKCE it also needs
-**Settings → OAuth & Permissions → Advanced token security via PKCE** turned
-on, which Slack makes a one-way switch, and the three redirect URLs the
-manifest below carries.
+The client id is on the app's Basic Information page. Two settings have to be
+made on that app, **in this order**:
+
+1. **Settings → OAuth & Permissions → Advanced token security via PKCE**, on.
+   Slack makes this a one-way switch.
+2. **`omarchy-slack://auth`** added to the Redirect URLs on the same page.
+
+The order is not a preference. Slack refuses a custom URI scheme from an app
+that is not yet a PKCE public client, and it refuses it in that field with the
+generic **"A valid URL must be entered"**, which says nothing about PKCE. With
+the switch on first, the field takes it.
 
 ### Or paste a token
 
@@ -221,10 +220,6 @@ browser flow is refused outright.
      name: Omarchy Slack
      description: Slack in the Omarchy bar
    oauth_config:
-     redirect_urls:
-       - http://localhost:45877/omarchy-slack
-       - http://localhost:45878/omarchy-slack
-       - http://localhost:45879/omarchy-slack
      scopes:
        user:
          - channels:history
@@ -818,6 +813,49 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.10.0 — 2026-09-06
+
+**The `http://localhost` sign-in route is gone.** If you signed in already,
+nothing happens: renewing a token does not use a redirect URL, so existing
+sign-ins keep working untouched. It is the *next* sign-in that changes.
+
+- **`omarchy-slack://` is the only way the browser comes back now**, and it is
+  set up as part of signing in rather than by a command you have to know
+  about. One desktop entry under `~/.local/share/applications/` and an
+  `xdg-mime` default, for your user alone; `--no-register` refuses instead if
+  you would rather do it by hand.
+
+  The reason is the Marketplace. An `http://` redirect URL is what a
+  submission is refused over, and the listing is not a vanity item: the rate
+  limits this entire plugin is shaped around — one `conversations.history` a
+  minute — are the ones a *non*-Marketplace app gets. So an app that cannot be
+  submitted is an app that stays slow for ever, and keeping the localhost URL
+  "just as a fallback" would have kept it unsubmittable.
+
+  There is no `https` answer to reach for: no public certificate authority
+  issues for `localhost`, a certificate shipped in an open-source plugin
+  publishes its own private key, and bouncing the callback through a host of
+  ours would put a third party in the middle of every sign-in.
+
+- **Where the scheme cannot work, paste a token.** A machine with no
+  `XDG_RUNTIME_DIR`, or a browser sandboxed away from the host's handlers,
+  can no longer use the browser sign-in at all — and that is the honest cost
+  of the line above. [Or paste a token](#or-paste-a-token) is still here, and
+  this is what it is for.
+
+- **`create-app` makes an app with no redirect URL at all**, which is the only
+  shape Slack accepts at creation: a scheme is refused from an app that is not
+  yet a PKCE public client, PKCE cannot be turned on in a manifest, and an
+  `http://` URL is the thing being removed. An app made that way is installed
+  from its own page and its token pasted, which uses no redirect. Turning PKCE
+  on and adding `omarchy-slack://auth` is what upgrades it to the browser
+  sign-in, in that order.
+
+- Gone with the route: `REDIRECT_PORTS`, the three registered ports and the
+  tried-in-order dance Slack's exact-match rule forced, the loopback listener,
+  and the page it used to write into the browser tab. A test now fails if an
+  `http://localhost` URL reappears in the helper.
 
 ### 0.9.7 — 2026-09-06
 
