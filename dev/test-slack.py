@@ -2303,10 +2303,33 @@ class BrowserSignIn(unittest.TestCase):
         mode = os.stat(slack.pending_path("work")).st_mode & 0o777
         self.assertEqual(mode, 0o600)
 
-    def test_without_a_client_id_it_says_so_rather_than_building_a_bad_url(self):
+    def test_naming_no_app_signs_in_through_the_shipped_one(self):
+        """The ordinary case: install the plugin and press the button.
+
+        The client id is an identifier rather than a secret - a public client
+        has nothing to keep - so it ships in the source and needs no setting.
+        """
         args = Args()
         args.client_id = ""
         answer = capture(slack.cmd_login_url, args)
+        self.assertTrue(answer["ok"])
+        self.assertIn("client_id=" + slack.DEFAULT_CLIENT_ID, answer["url"])
+
+    def test_a_build_with_no_app_of_its_own_says_so_rather_than_building_a_bad_url(self):
+        """A fork that strips the client id, or one made before there was one.
+
+        Worth keeping now that the default is set: this is the branch that
+        stops a sign-in from being sent to Slack as `client_id=`, which comes
+        back as `invalid_client_id` and explains nothing.
+        """
+        original = slack.DEFAULT_CLIENT_ID
+        slack.DEFAULT_CLIENT_ID = ""
+        try:
+            args = Args()
+            args.client_id = ""
+            answer = capture(slack.cmd_login_url, args)
+        finally:
+            slack.DEFAULT_CLIENT_ID = original
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["error"]["code"], "no_client_id")
 

@@ -72,8 +72,9 @@ omarchy plugin add https://github.com/janrenz/omarchy-slack.git --enable
 omarchy bar set janrenz.omarchy.slack account work
 ```
 
-Reload the shell and the icon is in the bar. Open the window, paste the token
-from your own Slack app (below), and it fills in.
+Reload the shell and the icon is in the bar. Open the window, press **Sign in
+with Slack**, and pick your workspace in the browser. Nothing to paste and no
+Slack app of your own to create.
 
 Nothing outside the plugin's own directory is written on install, and no
 configuration of yours is overwritten — the settings live in the widget's own
@@ -143,7 +144,16 @@ safe to ship:
 
 The token from this flow lasts twelve hours and is renewed from a refresh
 token that rotates with it. That happens on its own, before a poll that would
-otherwise fail; there is nothing to do about it and nothing to re-paste.
+otherwise fail; there is nothing to do about it and nothing to re-paste. Slack
+retires each refresh token as it is spent, so the renewal is taken under a
+lock — several copies of this plugin run at once, one behind the window and
+one behind the bar on each monitor, and two of them spending the same refresh
+token would sign the account out with no way back.
+
+**A refresh token from a PKCE sign-in expires after 30 days**, where one from
+the old pasted-token route did not expire at all. In practice a machine you
+use keeps renewing long before that; a machine you come back to after a month
+away asks you to sign in again, and says so rather than failing quietly.
 
 ### The `omarchy-slack://` handler
 
@@ -808,6 +818,34 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.9.7 — 2026-09-06
+
+- **There is a Slack app to sign in through now, so there is nothing to set
+  up.** Install the plugin, press **Sign in with Slack**, pick your workspace.
+  The client id in the source is an identifier and not a secret — a public
+  client has nothing to keep, which is what makes shipping one in the open the
+  intended use. What stops another copy of this plugin from finishing your
+  sign-in is the PKCE verifier, which is made fresh for each one and never
+  leaves the process that made it. An app of your own still works and is still
+  documented, for a workspace that would rather have its own audit trail.
+
+- **A refresh token from this flow expires after 30 days.** Slack's rule for
+  PKCE, and worth knowing because the old pasted-token route had no expiry at
+  all: a machine in daily use renews long before that, and one you come back to
+  after a month away asks for a sign-in.
+
+- **The app manifest's `token_rotation_enabled: False` no longer claims
+  rotation is not worth handling.** It is what an app made for the `localhost`
+  route gets; Slack issues a rotating token regardless wherever the
+  `omarchy-slack://` scheme is used, and this plugin has renewed one under a
+  lock since the browser sign-in existed.
+
+- **Public distribution is not a Marketplace listing, and the rate limits are
+  the Marketplace's.** Nothing here got faster: the one
+  `conversations.history` a minute still shapes the whole design, which is
+  what [How it knows what is new](#how-it-knows-what-is-new-and-why-it-is-built-the-way-it-is)
+  is about.
 
 ### 0.9.6 — 2026-09-06
 

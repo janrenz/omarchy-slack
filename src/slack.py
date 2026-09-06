@@ -3878,10 +3878,14 @@ def cmd_login_set(args):
 
 AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 
-# The app this plugin signs in through when nobody names another. Empty until
-# the public app exists; `login-url` says so plainly rather than building a URL
-# that would fail at Slack with `invalid_client_id`.
-DEFAULT_CLIENT_ID = ""
+# The app this plugin signs in through when nobody names another.
+#
+# An identifier, not a secret. A public client has nothing to keep - that is
+# what "public" means here - so this is shipped in the open on purpose, the way
+# a username is. What stops somebody else's copy from finishing your sign-in is
+# the PKCE verifier, which is generated per sign-in and never leaves the
+# process that made it.
+DEFAULT_CLIENT_ID = "1200324068996.11957809212113"
 
 # Slack matches a redirect URL exactly, including the port, so the port cannot
 # be picked freshly at sign-in the way a loopback listener usually would. These
@@ -4670,9 +4674,13 @@ def app_manifest(name=APP_NAME, scheme=False):
             "org_deploy_enabled": False,
             "socket_mode_enabled": False,
             "is_hosted": False,
-            # Rotation off on purpose: a rotating token expires in twelve hours
-            # and this plugin has nowhere to keep a refresh token safely enough
-            # to be worth it.
+            # Off here, and true anyway wherever the scheme is used: Slack
+            # "will always issue a rotating token even if the token rotation
+            # setting is turned off" for a PKCE app redirecting to a custom URI
+            # scheme. So this is what an app made for the localhost route gets,
+            # not a claim about what the plugin can handle - it renews a
+            # rotating token on its own, under a lock, and has since the
+            # browser sign-in existed.
             "token_rotation_enabled": False,
         },
     }
