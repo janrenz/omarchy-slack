@@ -723,6 +723,51 @@ missed it, or the poll ran while the window was shut — **Mark read** in the
 header (or `m`) clears it. The mark only ever moves forward, so nothing you
 have already read comes back.
 
+### A conversation you are reading keeps up by itself
+
+Everything above is about the sidebar. The transcript beside it used to sit
+still: a message arriving in the conversation on screen was announced in a
+toast, the row lit up, and the transcript went on saying what it said before
+until you pressed `r` — the one place left where being told about a message and
+being able to read it were two different actions.
+
+The poll already knows the newest message in every conversation, so the row for
+the one you are reading is compared against what its transcript accounts for,
+and a conversation that has moved on is read again. The comparison is on
+*change* rather than on the timestamps themselves: a row's ts comes from the
+search, which sees replies inside threads, while a transcript is the channel
+timeline — so a channel whose last word was a thread reply sits permanently
+ahead of anything its transcript can end on, and comparing the two directly
+would call that channel stale on every poll for ever.
+
+**Where you are in the transcript decides what happens.** Sitting on the newest
+message, it follows, and what arrives counts as read the moment it lands — the
+same rule that reads an unread conversation when you open it. Scrolled back
+through what was said earlier, nothing moves: being dragged down mid-sentence
+is what makes a window that updates itself worse than one that does not, and
+the row stays unread, because you have not seen it yet.
+
+**It gives way to you.** This is the only read nobody asked for, so it takes at
+most one `conversations.history` a minute and says nothing when it is refused.
+Opening a channel by hand must never come back "give it a moment and press `r`"
+because the window spent the minute on itself — one message behind is better
+than that sentence painted over a conversation you are reading. Nothing is
+lost: the next poll finds the conversation just as far behind and tries again.
+
+Two more things follow from it:
+
+- **A window you cannot see reads nothing.** The window keeps its workspace
+  while it is hidden, and re-reading a conversation nobody is looking at spends
+  the request Slack rations hardest on nothing at all. It catches up when it
+  comes back.
+- **The window hears the bar's poll, not only its own.** The bar and the window
+  each have their own timer and the bar's is the one that announces, so a
+  message could sit in a toast for a whole interval before the window's timer
+  came round to the same snapshot. They meet at the snapshot on disk: the
+  window watches that file and reads what has just been written to it rather
+  than going to Slack for it, so a toast and the message it is about arrive
+  together.
+
 ### Why there is no websocket
 
 The obvious answer to "it polls" is a socket, and Slack has one. It is not one
@@ -781,7 +826,11 @@ so it is a choice per install rather than a setting.
 
 ## What it does not do
 
-- **No live updates.** It polls on the interval above. Slack's websocket is
+- **No live updates, and no websocket.** It polls on the interval above. The
+  conversation you have open does keep up with that poll — see [a conversation
+  you are reading keeps up by
+  itself](#a-conversation-you-are-reading-keeps-up-by-itself) — but nothing
+  here is pushed, so the interval is still the floor. Slack's websocket is
   Socket Mode, it opens with an app-level token a shipped app cannot carry, and
   an app using it is barred from the Marketplace listing these rate limits
   depend on — see [Why there is no websocket](#why-there-is-no-websocket). An
