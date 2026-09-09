@@ -209,9 +209,9 @@ Item {
       // answer would come back shared and ask for one more.
       if (parsed.cached === true && Number(parsed.age || 0) > root.refreshIntervalSec)
         Qt.callLater(function() { root.refresh({ maxAge: 0 }) })
-      // A conversation open while the list refreshed is still the one being
-      // read; reloading it here would scroll the transcript out from under
-      // whoever is reading it.
+      // The list has just moved, and the conversation being read may be one
+      // of the rows that moved with it.
+      root.followOpenConversation()
       if (root.refreshQueued) Qt.callLater(root.refresh)
     }
   }
@@ -442,6 +442,131 @@ Item {
   readonly property bool reading: openConversation !== null
   readonly property bool inThread: threadTs !== ""
 
+  // ---- keeping the transcript up with the list ----------------------------
+  //
+  // Whether there is a transcript anybody can see. The window keeps its
+  // Service while it is hidden, and re-reading a conversation nobody is
+  // looking at spends the request Slack rations hardest on nothing at all.
+  // The bar's Service leaves this off: it draws a count and has no transcript.
+  property bool watching: false
+  // Whether the transcript is sitting on its newest message, as opposed to
+  // scrolled back through what was said earlier. The window sets it - see the
+  // transcript's followNewest in SlackWindow.qml - because it is a fact about
+  // the view rather than about the conversation. It decides whether a message
+  // that arrives while the conversation is open counts as read.
+  property bool atNewest: true
+
+  // The newest ts the transcript on screen already accounts for: what the
+  // sidebar row said when it was read, or the last message in it, whichever
+  // is later.
+  //
+  // Carried forward rather than measured off the transcript each time,
+  // because the two are not the same scale. A row's ts comes from the search
+  // feed, which sees thread replies, and `conversations.history` returns only
+  // top-level messages - so a channel whose last word was a reply in a thread
+  // has a row ts permanently ahead of anything its transcript can end on.
+  // Comparing the two directly would call that channel stale on every poll
+  // for good. What the two can be trusted to agree about is change, which is
+  // what this remembers. It is the same bargain the helper's transcript cache
+  // strikes - see "a transcript, remembered" in slack.py.
+  property string messagesWitness: ""
+  // Whether the transcript about to land was asked for - a conversation
+  // opened, a message sent, r pressed - or arrived on its own because the
+  // poll found the conversation had moved on. The first belongs at the newest
+  // message; the second must not take the view away from somebody reading
+  // further up.
+  property bool messagesUnasked: false
+
+  function newerTs(candidate, against) {
+    var x = parseFloat(candidate)
+    if (!isFinite(x)) return false
+    var y = parseFloat(against)
+    return !isFinite(y) || x > y
+  }
+
+  function rememberWitness(ts) {
+    if (newerTs(ts, messagesWitness)) messagesWitness = String(ts)
+  }
+
+  // The conversation on screen has moved on: read it again.
+  //
+  // A message arriving in the conversation somebody is already reading was
+  // announced in a toast and then not shown - the poll refreshed the list,
+  // the row lit up, and the transcript beside it went on saying what it said
+  // before until somebody pressed r. The poll knows the newest ts in every
+  // conversation, so the row for the one being read is compared with what the
+  // transcript already accounts for, and only a conversation that has
+  // genuinely moved on is read again.
+  //
+  // Not `fresh`: the helper invalidates a remembered transcript on the very
+  // value being compared here, so an ordinary read goes to Slack exactly when
+  // there is something new to fetch and costs nothing when there is not.
+  function followOpenConversation() {
+    if (!openConversation || !watching) return
+    if (messagesQueued || messagesLoading || messageProc.running) return
+    var row = rowFor(String(openConversation.id))
+    if (!row || !newerTs(String(row.ts || ""), messagesWitness)) return
+    // Slack allows an app outside its Marketplace about one
+    // `conversations.history` a minute, and this is the only caller nobody
+    // asked for - so it is the one that gives way. Reading a channel by hand
+    // must not come back "give it a moment and press r" because the window
+    // spent the minute's request on itself. Nothing is lost by waiting: the
+    // witness is left where it was, so the next poll finds the conversation
+    // just as far behind and tries again.
+    var now = Date.now()
+    if (now - lastFollowAt < 60000) return
+    lastFollowAt = now
+    fetchMessages(openConversation, threadTs, anchorTs, false, true)
+  }
+
+  // When the last automatic read went out. See the minute above.
+  property real lastFollowAt: 0
+
+  // A window that was hidden while the workspace carried on. Nothing was read
+  // for it - see `watching` - so what it comes back to may be a poll or two
+  // behind, and this is the moment to catch it up.
+  onWatchingChanged: if (watching) followOpenConversation()
+
+  // Where the helper keeps the snapshot the two Services share. Spelled out
+  // here because there is no other way to be told the moment one lands, and it
+  // is the one thing about the helper this file knows without having read it
+  // out of an answer - so it mirrors slack.py's CACHE_DIR, and moving that
+  // moves this. A workspace name cannot contain a separator; the helper
+  // refuses one that does - see alias_problem.
+  readonly property string cacheHome: {
+    var set = String(Quickshell.env("XDG_CACHE_HOME") || "")
+    return set !== "" ? set : String(Quickshell.env("HOME") || "") + "/.cache"
+  }
+  readonly property string snapshotPath:
+    alias === "" ? "" : cacheHome + "/omarchy/slack/" + alias + "/snapshot.json"
+
+  // Somebody else's poll, the moment it lands.
+  //
+  // The two Services on a workspace - one behind the bar, one behind the
+  // window - are two timers that have never heard of each other. The bar's is
+  // the one that announces, so a message could be in a toast a whole interval
+  // before the window's timer came round to read the same snapshot. That gap
+  // was invisible while the window only drew a list of previews; it is not
+  // now that the transcript follows the list, because a toast and the message
+  // it is about should arrive together.
+  //
+  // The snapshot on disk is where the two meet, and only a poll that went to
+  // Slack writes it. This does hear its own Service's polls - there is no
+  // telling whose write it was - but what follows one is a read answered out
+  // of that same file, and a read writes nothing, so it stops there rather
+  // than going round again. Nothing is read from the file here either;
+  // `preload: false` makes this a watch and not a reader.
+  FileView {
+    path: root.watching && root.configured ? root.snapshotPath : ""
+    watchChanges: true
+    preload: false
+    // Deliberately willing to take something stale: the file has this moment
+    // been written, so this can only be a read of what is already there. A
+    // tight max-age would turn a poll somebody else has already paid for into
+    // a second request to Slack.
+    onFileChanged: root.refresh({ maxAge: 3600 })
+  }
+
   // `fresh` means go to Slack whatever is on disk. Opening a conversation does
   // not: the helper keeps the last transcript it read and can tell, out of
   // what the poll already remembers, whether it is still current - which is
@@ -450,10 +575,14 @@ Item {
   // Pressing r means it, and so does the reload after sending or reacting:
   // that one is looking for something Slack has just been told and nothing
   // local knows yet.
-  function fetchMessages(row, thread, anchor, fresh) {
+  // `unasked` marks the one caller that is not a person: the poll noticing
+  // this conversation has moved on. It only decides where the transcript
+  // lands - see messagesUnasked - and never whether the read happens.
+  function fetchMessages(row, thread, anchor, fresh, unasked) {
     if (!row) return
     messagesError = ""
     messagesLoading = true
+    messagesUnasked = unasked === true
     // A conversation asked for before the settings arrived. The window is
     // summoned by a clicked toast or a row in the bar's dropdown and applies
     // the payload straight away, while the workspace name is still a
@@ -464,6 +593,12 @@ Item {
     // transcript is on its way, only not yet.
     if (!configured || pluginDir === "") { messagesQueued = true; return }
     messagesQueued = false
+    // What this read will account for, taken before it goes out rather than
+    // after: a message that arrives while the request is in flight is one the
+    // answer may not carry, and a witness read off the row afterwards would
+    // have swallowed it.
+    var witness = rowFor(String(row.id))
+    messagesWitness = witness ? String(witness.ts || "") : ""
     if (messageProc.running) messageProc.running = false
     var command = ["python3", helper(), "messages", "--account", alias,
                    "--channel", String(row.id), "--top", "40"]
@@ -586,6 +721,9 @@ Item {
     // Nothing is waiting on a workspace any more; there is no conversation to
     // run it for.
     messagesQueued = false
+    // Nothing on screen to be behind, either.
+    messagesWitness = ""
+    messagesUnasked = false
     draft = ""
     canvasFileId = ""
     canvasOpen = false
@@ -631,6 +769,13 @@ Item {
       root.messagesLoading = false
       var parsed = Model.parseJson(messageOut.text, null)
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        // A read nobody asked for fails quietly. The transcript on screen is
+        // still the transcript, and painting "Slack allows one request a
+        // minute, press r" over a conversation somebody is reading - because
+        // of a read they did not ask for - is worse than being one message
+        // behind. The witness stays where this read put it, so it is the next
+        // message that tries again rather than the next poll.
+        if (root.messagesUnasked) return
         root.messagesError = parsed && parsed.error
           ? String(parsed.error.message)
           : Model.oneLine(messageErr.text || "Could not read this conversation", 160)
@@ -638,6 +783,23 @@ Item {
       }
       root.messagesError = ""
       root.messages = parsed.messages || []
+      // Everything on screen is accounted for, whatever the row said. A
+      // message just sent is in the transcript before the poll has seen it,
+      // and without this the next poll would take it for news and read the
+      // conversation again for something it is already showing.
+      if (root.messages.length > 0)
+        root.rememberWitness(String(root.messages[root.messages.length - 1].ts || ""))
+      // Something that arrived in the conversation while it was open, on
+      // screen, and sitting on its newest message has been read the moment it
+      // landed - the same rule that makes opening an unread conversation read
+      // it. Not while the reader is scrolled back through what was said
+      // earlier: they have not seen it yet, and the sidebar's mark is the only
+      // thing left saying so.
+      if (root.messagesUnasked && root.watching && root.atNewest
+          && root.threadTs === "" && root.messages.length > 0) {
+        var lit = root.rowFor(String(root.openConversation ? root.openConversation.id : ""))
+        if (lit && lit.unread === true) root.markRead(root.newestKnownTs())
+      }
       // Marked read up to the newest message actually read, which is only
       // known now.
       if (root.markOnLoad && root.threadTs === "" && root.messages.length > 0) {

@@ -723,11 +723,69 @@ missed it, or the poll ran while the window was shut — **Mark read** in the
 header (or `m`) clears it. The mark only ever moves forward, so nothing you
 have already read comes back.
 
+### Why there is no websocket
+
+The obvious answer to "it polls" is a socket, and Slack has one. It is not one
+this plugin can hold, and the reason is worth writing down because it is the
+same reason as everywhere else on this page.
+
+**The socket that would have fitted is gone.** The RTM API opened a websocket
+with the user token and nothing else — no second credential to keep anywhere,
+which is exactly what a plugin wants. It only ever worked for *classic* apps,
+which have not been creatable for years, and the ones still running stop
+working on **16 November 2026**.
+
+**Its replacement needs a secret this plugin cannot ship.** Socket Mode is the
+supported way now: `apps.connections.open` hands back a `wss://` URL and events
+arrive pushed, with no public HTTPS endpoint anywhere — which is the part a
+laptop could never have provided, so the shape is right. But the connection
+opens with an *app-level token* (`xapp-…`, scope `connections:write`), and that
+token belongs to the app rather than to the person signing in. The client id
+that ships here is an identifier, which is what a public client means, and
+shipping it is safe. An app-level token is not: it would hand every installer a
+credential to the app everybody else installed too.
+
+**And it would cost the listing.** Slack's own words: *"Apps using Socket Mode
+are not currently allowed in the public Slack Marketplace."* The Marketplace is
+what the one-`conversations.history`-a-minute paragraph above is about — the
+whole shape of this plugin is an argument for getting listed. Opening a socket
+to save a two-minute wait, at the price of the rate limits everything else here
+is built around, is the wrong way round.
+
+So live updates are not impossible. They are impossible *for the app that ships
+with the plugin*. For [an app of your own](#or-an-app-of-your-own) they are on
+the table, because that app is never submitted anywhere and the restriction
+does not reach it. What it would take, on Slack's side:
+`settings.socket_mode_enabled` and `settings.event_subscriptions.user_events`
+in the manifest — `message.channels`, `message.groups`, `message.im`,
+`message.mpim` — an app-level token generated under *Basic Information →
+App-Level Tokens* with `connections:write`, and a reinstall afterwards. Those
+are *user* events: no bot scopes, no administrator's consent, only the user
+scopes the app already asks for.
+
+**None of that is wired up, and there is nowhere to paste an `xapp-` token
+today.** What it would take on this side is a helper that stays running — this
+one is started per poll, answers in JSON and exits — a websocket client written
+by hand, because the standard library has none and this file carries no
+dependencies, and a debounce. An event says only that something happened in
+`C0123`; it does not carry a preview or an unread mark, and those still come
+out of the one search. So an event would *trigger* a poll rather than replace
+one, with the timer left underneath as a fallback.
+
+One thing to weigh before going that way: an app of your own keeps the
+non-Marketplace limits for ever. Today that costs nothing, because the app that
+ships here is not listed either and lives under exactly the same limits. If the
+listing comes through, the shipped app gets faster and yours stays where it is.
+Slack does not offer instant delivery and Marketplace limits at the same time,
+so it is a choice per install rather than a setting.
+
 ## What it does not do
 
-- **No live updates.** It polls on the interval above. Live Slack means a
-  websocket held open for the session, and a desktop shell has no business
-  running one.
+- **No live updates.** It polls on the interval above. Slack's websocket is
+  Socket Mode, it opens with an app-level token a shipped app cannot carry, and
+  an app using it is barred from the Marketplace listing these rate limits
+  depend on — see [Why there is no websocket](#why-there-is-no-websocket). An
+  app of your own could have it; nothing here is wired up for it yet.
 - **Opening conversations quickly runs into Slack's own wall.** One history
   request a minute, plus a burst of about fifteen, for any app outside the
   Marketplace. Reading is unaffected once a conversation is open; it is opening
@@ -813,6 +871,50 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.11.0 — 2026-09-09
+
+- **A message arriving in the conversation you are reading now appears in it.**
+  The toast said something had been said and the row beside it lit up, but the
+  transcript went on showing what it showed before until you pressed `r` — the
+  one place left where being told about a message and being able to read it
+  were two different actions. The poll already knows the newest message in
+  every conversation, so the row for the one on screen is compared against what
+  the transcript accounts for, and only a conversation that has genuinely moved
+  on is read again.
+
+- **It will not move you while you are reading further up.** Being dragged down
+  to the newest message mid-sentence is the thing that makes a window which
+  updates itself worse than one that does not, so a transcript nobody asked for
+  keeps the view where it is. It follows only when you were already sitting on
+  the newest message — which is also the case where the message counts as read
+  the moment it lands, the same rule that reads an unread conversation when you
+  open it. Scrolled back, the sidebar's mark is left saying you have not seen
+  it.
+
+- **And it gives way to you.** An automatic read is the only caller nobody
+  asked for, so it takes at most one `conversations.history` a minute and stays
+  quiet when it fails: opening a channel by hand must never come back "give it
+  a moment and press `r`" because the window spent the minute on itself.
+  Nothing is lost by waiting — the next poll finds the conversation just as far
+  behind and tries again.
+
+- **The window hears the bar's poll now, not only its own.** The two Services
+  on a workspace are two timers that have never heard of each other, so a
+  message could sit in a toast for a whole interval before the window's own
+  timer came round to the same snapshot. They meet at the snapshot on disk: the
+  window watches it and reads what is already there, so a toast and the message
+  it is about arrive together. A hidden window reads nothing at all — a
+  conversation nobody can see is not worth the request.
+
+- **Why there is no websocket is written down.** The RTM API — the one that
+  opened a socket with nothing but the user token, which is exactly what a
+  plugin wants — has not been creatable for years and stops working on 16
+  November 2026. Its replacement, Socket Mode, opens with an app-level token a
+  shipped app cannot carry, and an app using it may not be listed in the
+  Marketplace whose rate limits this plugin is shaped around. See *Why there is
+  no websocket* for what an app of your own would need; nothing here is wired
+  up for it yet.
 
 ### 0.10.1 — 2026-09-06
 

@@ -659,8 +659,10 @@ form.
 Recorded because they are decisions, not omissions. Full prose in `README.md` →
 *What it does not do*.
 
-- **No live updates.** Live Slack means a websocket held open for the session,
-  and a desktop shell has no business running one.
+- **No live updates.** Slack's websocket is Socket Mode; it opens with an
+  app-level token a shipped app cannot carry, and an app using it may not be
+  listed in the Marketplace whose rate limits this plugin is shaped around. An
+  app of your own can have it — see README.md → *Why there is no websocket*.
 - **Nothing quieter than a fortnight gets a preview** unless seen in an earlier
   poll. Its row shows the channel topic instead.
 - **An unread count is counted out of the search**, so a conversation with more

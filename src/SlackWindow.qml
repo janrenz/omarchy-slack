@@ -208,6 +208,15 @@ Item {
     settings: root.settings
     pluginDir: root.pluginDir
 
+    // There is a transcript here, and it is worth keeping up with the poll -
+    // which the bar's Service, drawing a count, is not. Only while the window
+    // is mapped: a conversation nobody can see is not worth the request.
+    watching: window.visible
+    // Where the reader is in it. A message that arrives while they are at the
+    // newest one may take the view with it and counts as read; one that
+    // arrives while they are reading further up may do neither.
+    atNewest: transcript.followNewest
+
     // A browser sign-in has just finished, and the browser still has the
     // screen: the callback is delivered to a handler that exits, so unlike a
     // tab-based redirect there is nothing left over to close and hand the
@@ -2355,6 +2364,15 @@ Item {
                   Connections {
                     target: service
                     function onMessagesChanged() {
+                      // A transcript nobody asked for - the poll found a
+                      // message had arrived in the conversation on screen -
+                      // keeps whoever is reading where they are. Following
+                      // again here would drag them down to the newest message
+                      // mid-sentence, which is the thing that makes a window
+                      // that updates itself worse than one that does not. It
+                      // still follows when they were already at the bottom,
+                      // which is where a conversation being watched sits.
+                      if (service.messagesUnasked && !transcript.followNewest) return
                       transcript.followNewest = true
                       Qt.callLater(transcript.toNewest)
                     }
