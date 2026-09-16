@@ -99,9 +99,13 @@ Column {
     Row {
       spacing: Style.spacing.sm
 
+      // Not disabled on a missing workspace name: the kit's Button draws a
+      // disabled one exactly like a live one, so that read as a button that
+      // does nothing rather than as a step still to do. It stays pressable and
+      // the service says what is missing, under the buttons where every other
+      // sign-in complaint already appears.
       Button {
         enabled: !!root.service && !root.service.signingIn
-                 && String(root.current("account", "")).trim() !== ""
         text: root.service && root.service.browserSignIn ? "Waiting for Slack…" : "Sign in with Slack"
         bordered: true
         foreground: Color.accent
@@ -158,16 +162,21 @@ Column {
 
       Button {
         enabled: !!root.service && !root.service.signingIn && root.tokenText.trim() !== ""
-                 && String(root.current("account", "")).trim() !== ""
         text: root.service && root.service.signingIn ? "Checking…" : "Sign in"
         bordered: true
         foreground: Color.accent
         fontFamily: Style.font.family
         fontSize: Style.font.caption
+        // Cleared only once the token is actually on its way to the helper,
+        // for the same reason the settings are: a refusal that also emptied
+        // the box would cost somebody the paste as well as the attempt.
         onClicked: {
-          if (root.service) root.service.signIn(root.tokenText)
-          root.tokenText = ""
-          tokenField.field.text = ""
+          if (!root.service) return
+          root.service.signIn(root.tokenText)
+          if (root.service.signingIn) {
+            root.tokenText = ""
+            tokenField.field.text = ""
+          }
         }
       }
 

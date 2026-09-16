@@ -1562,8 +1562,16 @@ Item {
   // the moment the process has it.
   property string pendingToken: ""
 
+  // A missing workspace name is the one refusal a person can act on, so it is
+  // said rather than swallowed. Both ways in used to `return` on `!configured`
+  // and the form disabled its own buttons on the same condition, so the very
+  // first thing anybody does here - press Sign in before naming the workspace -
+  // was answered by nothing at all, twice over.
+  readonly property string nameNeeded: "Name this workspace first - the box above. It only names the token file on disk."
+
   function signIn(token) {
-    if (signingIn || pluginDir === "" || !configured) return
+    if (signingIn || pluginDir === "") return
+    if (!configured) { signInError = nameNeeded; return }
     var text = String(token || "").trim()
     if (text === "") { signInError = "Paste the User OAuth Token from your Slack app"; return }
     signingIn = true
@@ -1612,7 +1620,8 @@ Item {
   property bool browserSignIn: false
 
   function signInWithBrowser() {
-    if (signingIn || pluginDir === "" || !configured) return
+    if (signingIn || pluginDir === "") return
+    if (!configured) { signInError = nameNeeded; return }
     signingIn = true
     browserSignIn = true
     signInError = ""
