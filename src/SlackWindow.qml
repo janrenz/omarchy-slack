@@ -1275,12 +1275,13 @@ Item {
               // there is one, which the transcript said when it landed - a
               // button offering a canvas that does not exist is worse than no
               // button, and every channel would have had one.
-              Button {
+              KeyButton {
                 visible: service.hasCanvas && !service.inThread && !root.showSettings
                 text: "Canvas"
+                keyText: "c"
                 tooltipText: service.canvasOpen
-                  ? "Back to the conversation  (c)"
-                  : "Read this channel's canvas  (c)"
+                  ? "Back to the conversation"
+                  : "Read this channel's canvas"
                 selected: service.canvasOpen
                 bordered: true
                 foreground: service.canvasOpen ? Color.accent : Color.foreground
@@ -1320,10 +1321,11 @@ Item {
               // that does nothing; it appears for the ones that stay lit -
               // a thread reply nobody opened the thread for, or a poll that
               // marked read while the window was closed.
-              Button {
+              KeyButton {
                 visible: service.canMarkCurrentRead && !root.showSettings
                 text: "Mark read"
-                tooltipText: "Mark this conversation read  (m)"
+                keyText: "m"
+                tooltipText: "Mark this conversation read"
                 bordered: true
                 foreground: Color.foreground
                 fontFamily: Style.font.family
@@ -1360,10 +1362,11 @@ Item {
                 onClicked: root.openSearch()
               }
 
-              Button {
+              KeyButton {
                 visible: service.signedIn && !root.showSettings
                 text: "Jump to"
-                tooltipText: "Any channel or person  (n, or Ctrl-k)"
+                keyText: "n"
+                tooltipText: "Any channel or person — n, or Ctrl-k"
                 bordered: true
                 foreground: Color.accent
                 fontFamily: Style.font.family
@@ -2267,10 +2270,11 @@ Item {
                   visible: service.canvasOpen
                   spacing: Style.spacing.sm
 
-                  Button {
+                  KeyButton {
                     visible: !service.canvasEditing && service.canvasReplaceable
                     text: "Edit"
-                    tooltipText: "Write in this canvas  (e)"
+                    keyText: "e"
+                    tooltipText: "Write in this canvas"
                     bordered: true
                     foreground: Color.foreground
                     fontFamily: Style.font.family
@@ -3090,9 +3094,10 @@ Item {
                     onClicked: attachDialog.open()
                   }
 
-                  Button {
+                  KeyButton {
                     enabled: !service.messagesLoading
                     text: "Reload"
+                    keyText: "r"
                     bordered: true
                     foreground: Color.foreground
                     fontFamily: Style.font.family
@@ -3103,9 +3108,10 @@ Item {
                   // The same handover the a key does. Gone entirely when the
                   // setting is off, rather than disabled: a button that cannot
                   // ever do anything is worse than no button.
-                  Button {
+                  KeyButton {
                     visible: service.agentHandover
                     text: "Ask agent"
+                    keyText: "a"
                     tooltipText: "Open your coding agent on this conversation"
                     bordered: true
                     foreground: Color.foreground
