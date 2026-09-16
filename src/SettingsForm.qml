@@ -124,10 +124,14 @@ Column {
     onEdited: function(value) { root.change("account", value) }
   }
 
+  // `signedIn` alone is too broad to gate this on: it is false for a workspace
+  // nobody has ever signed into and equally false for the half-second after a
+  // sign-in worked, while the first poll is still out - so the whole form went
+  // on offering a sign-in to somebody who had just completed one.
   Column {
     width: parent.width
     spacing: Style.spacing.sm
-    visible: !!root.service && !root.service.signedIn
+    visible: !!root.service && !root.service.signedIn && !root.service.signedInWaiting
 
     Text {
       width: parent.width
@@ -268,11 +272,15 @@ Column {
 
   Text {
     width: parent.width
-    visible: !!root.service && root.service.signInError !== ""
-    text: root.service ? root.service.signInError : ""
+    visible: !!root.service
+             && (root.service.signInError !== "" || root.service.signInMessage !== "")
+    text: root.service
+      ? (root.service.signInError !== "" ? root.service.signInError : root.service.signInMessage)
+      : ""
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
-    color: Color.urgent
+    color: root.service && root.service.signInError !== "" ? Color.urgent
+                                                           : Qt.darker(Color.foreground, 1.4)
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
   }

@@ -175,6 +175,7 @@ Item {
     stderr: StdioCollector { id: fetchErr; waitForEnd: true }
     onExited: function(exitCode) {
       root.loading = false
+      root.signedInWaiting = false
       if (exitCode !== 0) {
         root.errorCode = "helper_failed"
         root.errorMessage = Model.oneLine(fetchErr.text || "The helper could not be run", 160)
@@ -1555,6 +1556,18 @@ Item {
   property string signInMessage: ""
   property string signInError: ""
 
+  // A sign-in has landed and the first poll has not answered yet.
+  //
+  // The snapshot is dropped at the same moment, because one earned before a
+  // sign-in describes a workspace nobody was signed in to - and leaving it
+  // there kept `needsSignIn` true off its stale auth_required, so the sign-in
+  // card went on being drawn over the top of "reading your conversations…".
+  // `view` then falls back to its not-loaded state, which is neutral rather
+  // than signed in, and this is what tells those two apart while the answer is
+  // on its way: signed in as far as anything here knows, and nothing should be
+  // offering a sign-in over it.
+  property bool signedInWaiting: false
+
   // A browser sign-in finished. The window listens for this to bring itself
   // back to the front; the bar's Service has no window and ignores it.
   signal signedInNow(string team)
@@ -1606,6 +1619,8 @@ Item {
       root.signInError = ""
       root.signInMessage = "Signed in to " + String(parsed.team || "Slack")
         + " as " + String(parsed.user || "")
+      root.snapshot = null
+      root.signedInWaiting = true
       root.refresh()
     }
   }
@@ -1675,6 +1690,8 @@ Item {
       root.signInError = ""
       root.signInMessage = "Signed in to " + String(parsed.team || "Slack")
         + " as " + String(parsed.user || "")
+      root.snapshot = null
+      root.signedInWaiting = true
       root.refresh()
       // The browser has had the screen for the last half minute and still has
       // it. This is the one sign-in route where nothing gives the focus back:
@@ -1712,6 +1729,7 @@ Item {
     stdout: StdioCollector { id: signOutOut; waitForEnd: true }
     onExited: function(_exitCode) {
       root.snapshot = null
+      root.signedInWaiting = false
       root.closeConversation()
       root.signInMessage = ""
       // Nothing on disk is worth believing about a workspace that has just
