@@ -921,6 +921,44 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 ## Changelog
 
+### 0.11.1 — 2026-09-16
+
+- **Naming a workspace now takes.** The window reads the bar layout once, when
+  it opens, and nothing re-read it afterwards — so the name you typed went into
+  `shell.json` and the window went on holding what it had read when it came up.
+  Everything is derived from that, so every check still answered "no
+  workspace": the sign-in refused, the card went on asking for a name, and the
+  only thing that made the name appear was closing the window and opening it
+  again. It reads back what it has just written.
+
+- **Sign in pressed before the workspace is named says so.** Both buttons were
+  disabled until a name had been *saved*, and a disabled button in the kit is
+  drawn exactly like a live one — so the first thing anybody does here was
+  answered by a button that looked ready and did nothing, twice over, because
+  the service refused silently underneath. Pressing it now writes the name
+  first and signs in when it comes back, and a sign-in with no name at all is
+  told which box to fill in.
+
+- **The window opens on the setup rather than on a sentence pointing at it.**
+  Nothing here works without a workspace name, so sending you off to find the
+  gear was a step with no decision in it. Offered once per open, not a binding:
+  closing the pane with the name still empty is an answer.
+
+- **The sign-in card goes away once you have signed in.** It stayed up over the
+  top of "reading your conversations…", because what it reads is the last
+  answer from before the sign-in — the workspace refusing one — and that is
+  only replaced when the first poll lands. A snapshot earned before a sign-in
+  describes a workspace nobody was signed in to, so it is no longer believed
+  for another round trip. A token that genuinely expires later still brings the
+  card back.
+
+- **The buttons say which key does the same thing.** `?` lists every binding,
+  but a list is something you go and look at, and a tooltip waits for a hover
+  somebody reaching for the mouse was never going to give it. Canvas, Mark
+  read, Jump to, Edit, Reload and Ask agent each carry their key next to the
+  label, drawn dim — a second way to do the same thing, not part of the
+  button's name.
+
 ### 0.11.0 — 2026-09-09
 
 - **A message arriving in the conversation you are reading now appears in it.**
