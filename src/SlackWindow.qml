@@ -41,6 +41,7 @@ Item {
 
   function open(payloadJson) {
     closingFromHost = false
+    setupOffered = false
     loadSettings()
     // Remembered before the payload is applied, because applying one opens a
     // conversation and the conversation is in the window's title - a moment
@@ -170,6 +171,24 @@ Item {
   property bool settingsLoaded: false
   property string settingsError: ""
 
+  // Nothing in this window works without a workspace name, so it opens on the
+  // place one is given rather than on a sentence pointing at it. Not a binding
+  // but an offer made once per open(): somebody who closes the pane with the
+  // name still empty has said what they want, and a pane that comes back is a
+  // pane that argues.
+  //
+  // A settingsError is deliberately not this - "no Slack widget in the bar" is
+  // not something this form can write its way out of.
+  readonly property bool needsSetup: settingsLoaded && settingsError === ""
+                                     && !service.configured
+  property bool setupOffered: false
+
+  function offerSetup() {
+    if (setupOffered || !needsSetup) return
+    setupOffered = true
+    showSettings = true
+  }
+
   function loadSettings() {
     if (configProc.running || pluginDir === "") return
     configProc.command = ["python3", pluginDir + "/config.py",
@@ -200,6 +219,8 @@ Item {
       }
       root.settingsError = ""
       root.settings = widgets[0].settings || {}
+      // Deferred so `configured` has taken the new settings before it is asked.
+      Qt.callLater(root.offerSetup)
     }
   }
 
@@ -225,6 +246,15 @@ Item {
     // Only when this window is mapped. A sign-in driven from the bar's
     // settings pane with no window open should not conjure one - the toast
     // that goes out beside this is what tells that case it worked.
+    // The window reads the bar layout once, in open(), so its own save was
+    // invisible to it: the name landed in shell.json and `settings` here went
+    // on holding what was read when the window came up. `configured` is
+    // derived from that, so naming the workspace and saving it left every
+    // check still answering "no workspace" - the sign-in refused, the card
+    // kept asking for a name, and only closing and reopening the window made
+    // the name it had just written appear.
+    onSettingsSaved: root.loadSettings()
+
     onSignedInNow: function (team) {
       // Signing in is nearly always done from the settings pane or the
       // sign-in card, and both of those are the last thing anybody wants to

@@ -56,13 +56,58 @@ Column {
     service.saveSettings(pending)
   }
 
+  // A sign-in pressed before the name was saved, waiting for it. "" | "browser"
+  // | "token".
+  //
+  // The two halves of this form read the workspace name from different places:
+  // `current()` shows what has been typed, and the service derives `alias` -
+  // and `configured` with it - from what is written in shell.json. So a name
+  // typed into the box above and not saved is a name the sign-in cannot see,
+  // and pressing Sign in went to a service that still knew no workspace. The
+  // press now writes the name first and signs in when it comes back.
+  property string signInAfter: ""
+
+  function signInNow(what) {
+    if (!service) return
+    if (pending["account"] === undefined) {
+      if (what === "browser") service.signInWithBrowser()
+      else service.signIn(root.tokenText)
+      return
+    }
+    signInAfter = what
+    service.saveSettings(pending)
+  }
+
   Connections {
     target: root.service
     // Cleared only once the write has actually landed, so a failed save keeps
     // what was typed rather than throwing it away and saying so.
     function onSettingsSaved() {
       root.pending = ({})
-      root.closeRequested()
+      // A queued sign-in stays here rather than closing: the name still has to
+      // be read back off the file before the service can see it, and this is
+      // where the sign-in reports.
+      if (root.signInAfter === "") root.closeRequested()
+    }
+
+    // The name has come back from the file. `configured` is derived from it, so
+    // this is the first moment a queued sign-in can be anything but refused.
+    function onConfiguredChanged() {
+      if (root.signInAfter === "" || !root.service.configured) return
+      var what = root.signInAfter
+      root.signInAfter = ""
+      if (what === "browser") root.service.signInWithBrowser()
+      else root.service.signIn(root.tokenText)
+      if (root.service.signingIn) {
+        root.tokenText = ""
+        tokenField.field.text = ""
+      }
+    }
+
+    // A save that failed is never read back, so a sign-in waiting on one would
+    // wait for good - and then fire on some later, unrelated save.
+    function onSaveErrorChanged() {
+      if (root.service.saveError !== "") root.signInAfter = ""
     }
   }
 
@@ -111,7 +156,7 @@ Column {
         foreground: Color.accent
         fontFamily: Style.font.family
         fontSize: Style.font.caption
-        onClicked: if (root.service) root.service.signInWithBrowser()
+        onClicked: root.signInNow("browser")
       }
 
       Button {
@@ -171,9 +216,8 @@ Column {
         // for the same reason the settings are: a refusal that also emptied
         // the box would cost somebody the paste as well as the attempt.
         onClicked: {
-          if (!root.service) return
-          root.service.signIn(root.tokenText)
-          if (root.service.signingIn) {
+          root.signInNow("token")
+          if (root.service && root.service.signingIn) {
             root.tokenText = ""
             tokenField.field.text = ""
           }
