@@ -1374,6 +1374,37 @@ class Caches(unittest.TestCase):
         self.assertNotIn("cached", payload)
         self.assertTrue(asked, "it went and asked")
 
+    def _cached_only(self):
+        """A fetch from a paused window, with a Slack that may not be asked."""
+        class Explode(slack.Slack):
+            def call(self, *a, **k):
+                raise AssertionError("a paused fetch must not reach Slack")
+
+        args = Args()
+        args.account, args.demo, args.max_age = ["work"], False, 0
+        args.conversations, args.sort = 40, "recent"
+        args.avatars = args.presence = args.fresh = False
+        args.cached_only = True
+        original = slack.Slack
+        slack.Slack = Explode
+        try:
+            return capture(slack.cmd_fetch, args)
+        finally:
+            slack.Slack = original
+
+    def test_paused_paints_from_a_snapshot_of_any_age(self):
+        slack.write_json(slack.cache_path("work", "snapshot.json"),
+                         {"snapshot": {"ok": True, "accounts": [{"alias": "work", "ok": True}]},
+                          "at": time.time() - 7 * 24 * 3600})
+        payload = self._cached_only()
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["accounts"][0]["alias"], "work")
+
+    def test_paused_with_nothing_on_disk_says_so_and_asks_nobody(self):
+        payload = self._cached_only()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "not_cached")
+
     def test_presence_is_kept_and_not_asked_again_on_the_next_poll(self):
         asked = []
 

@@ -20,6 +20,9 @@ import Quickshell.Wayland
 //   battery  on battery the cadence is stretched rather than stopped, and
 //            stretched further in the power-saver profile, because the user
 //            asking the system for less power is asking us too.
+//   held     the user said stop. Not a guess about whether anybody is there
+//            but an instruction, so it holds whatever the other three think,
+//            and whether or not they are switched on at all.
 //
 // Slack's rate limits make this more than housekeeping here: a poll costs a
 // search against a budget of roughly one conversations.history a minute, and
@@ -38,12 +41,15 @@ QtObject {
   property bool pauseWhenAway: true
   property bool pauseWhenOffline: true
   property bool slowOnBattery: true
+  // The manual pause. Deliberately not tied to the three switches above: a
+  // plugin that has turned the automatic gate off has not turned this off.
+  property bool held: false
 
   readonly property bool away: pauseWhenAway && idleSeconds > 0 && idle.isIdle
   readonly property bool offline: pauseWhenOffline
                                  && Networking.canCheckConnectivity
                                  && Networking.connectivity === NetworkConnectivity.None
-  readonly property bool paused: away || offline
+  readonly property bool paused: held || away || offline
 
   // What to multiply a poll interval by. Whole numbers, so a mailbox asked for
   // every three minutes lands on six or nine rather than something unreadable
@@ -55,6 +61,9 @@ QtObject {
 
   // For a host that wants to say why the panel is not moving. Empty when it is.
   readonly property string reason: {
+    // First, because it is the one the user can undo, and the only one they
+    // may have forgotten doing.
+    if (held) return "paused by you"
     if (offline) return "offline"
     if (away) return "paused while you are away"
     return ""

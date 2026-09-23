@@ -132,12 +132,21 @@ Item {
   // Whether anything has been drawn yet. Until then, anything on disk beats a
   // blank sidebar for the length of a poll.
   property bool painted: false
+  // What the fetch in flight was. `automatic` is anything nobody pressed - the
+  // timer, the settings arriving, somebody else's poll landing on disk - and
+  // it decides whether the requests that ride on a fetch may follow it while
+  // the user has paused. `cachedOnly` is a read of the disk that must not turn
+  // into a request when the disk has nothing.
+  property bool fetchAutomatic: false
+  property bool fetchCachedOnly: false
 
   function refresh(options) {
     if (!configured || pluginDir === "") return
     var wants = options || {}
     if (fetchProc.running) { refreshQueued = true; return }
     refreshQueued = false
+    fetchAutomatic = wants.automatic === true
+    fetchCachedOnly = wants.cachedOnly === true
     loading = true
     var command = ["python3", helper(), "fetch", "--account", alias,
                    "--conversations", String(conversationCount), "--sort", sortOrder]
@@ -147,6 +156,7 @@ Item {
                : (!painted ? 900 : (wants.maxAge === undefined ? shareAge : wants.maxAge))
     if (maxAge > 0) command = command.concat(["--max-age", String(maxAge)])
     if (wants.fresh === true) command.push("--fresh")
+    if (fetchCachedOnly) command.push("--cached-only")
     if (!wantsDecoration || !wantAvatars) command.push("--no-avatars")
     if (!wantsDecoration || !wantPresence) command.push("--no-presence")
     if (demo) command.push("--demo")
@@ -187,6 +197,12 @@ Item {
         root.errorMessage = "Could not read the helper's response"
         return
       }
+      // Nothing on disk to paint while paused. Not an error anybody has to
+      // read: the panel says it is paused, and whatever it showed stays.
+      if (root.fetchCachedOnly && parsed.cached !== true) {
+        if (root.refreshQueued) Qt.callLater(root.refresh)
+        return
+      }
       root.errorCode = ""
       root.errorMessage = ""
       root.snapshot = parsed
@@ -199,7 +215,9 @@ Item {
       // keyed by conversation and ts and drops what it has already said, so
       // seeing the same snapshot twice is silent.
       root.announceNew()
-      root.loadPresence()
+      // Presence is a request per person, which is exactly what a pause is
+      // for - unless this fetch is one somebody asked for by hand.
+      if (!root.paused || !root.fetchAutomatic) root.loadPresence()
       // Painted from a snapshot somebody else earned, and worth replacing with
       // a poll of our own only when it is genuinely old: that is the bootstrap
       // case, where anything on disk beats a blank sidebar for the length of a
@@ -208,8 +226,9 @@ Item {
       // poller on a two-monitor desktop, and now that the helper hands back
       // what another process's poll wrote it would not even terminate: every
       // answer would come back shared and ask for one more.
-      if (parsed.cached === true && Number(parsed.age || 0) > root.refreshIntervalSec)
-        Qt.callLater(function() { root.refresh({ maxAge: 0 }) })
+      if (parsed.cached === true && Number(parsed.age || 0) > root.refreshIntervalSec
+          && !root.paused)
+        Qt.callLater(function() { root.refresh({ maxAge: 0, automatic: true }) })
       // The list has just moved, and the conversation being read may be one
       // of the rows that moved with it.
       root.followOpenConversation()
@@ -225,8 +244,18 @@ Item {
   // A poll costs a search against Slack's budget whether or not anybody is here.
   readonly property bool pausePolling: setting("pausePolling", true) !== false
 
+  // The pause the user switches on and off, as opposed to the one above that
+  // guesses. It stops everything that goes to Slack on its own - the timer,
+  // the refresh the settings arriving would start, presence, the transcript
+  // following the list - and leaves alone whatever somebody does by hand:
+  // Refresh, r, opening a conversation, sending. A setting rather than a
+  // property of this Service, so it holds across a shell restart and so the
+  // bar's Service and the window's agree about it.
+  readonly property bool paused: setting("paused", false) === true
+
   PollGate {
     id: poll
+    held: root.paused
     pauseWhenAway: root.pausePolling
     pauseWhenOffline: root.pausePolling
     slowOnBattery: root.pausePolling
@@ -234,6 +263,9 @@ Item {
 
   // For a host that wants to explain a sidebar that is not moving.
   readonly property string pollReason: poll.reason
+
+  function setPaused(on) { return saveSettings({ paused: on === true }) }
+  function togglePause() { return setPaused(!paused) }
 
   // triggeredOnStart is what makes waking up and coming back online immediate:
   // the gate opening restarts this timer, and a restarted timer fires at once
@@ -254,7 +286,22 @@ Item {
   // runs before the bindings for everything else read out of the same settings
   // - and a fetch started there asked with the old values. It cost an hour to
   // find, because what it looked like was the demo fixtures being ignored.
-  function scheduleRefresh() { Qt.callLater(refresh) }
+  //
+  // A named function rather than a closure, because Qt.callLater folds calls
+  // to the same function into one: resuming both changes the settings and
+  // restarts the timer, and that is one poll, not two.
+  //
+  // Paused, the only thing that goes out is a read of the disk, and only
+  // while nothing has been painted: a shell started with the pause on should
+  // still show what it knew, not an empty panel. Which of the two is decided
+  // once the call runs, not when it is scheduled - the settings that flip the
+  // pause are the same ones that schedule this, and `paused` has not caught up
+  // with them yet in their own change handler.
+  function scheduleRefresh() { Qt.callLater(automaticRefresh) }
+  function automaticRefresh() {
+    if (!paused) refresh({ automatic: true })
+    else if (!painted) refresh({ automatic: true, cachedOnly: true })
+  }
 
   // Each of these is a way the workspace can have just become known, and a
   // conversation opened before it was is waiting on exactly that. Replayed
@@ -503,7 +550,7 @@ Item {
   // value being compared here, so an ordinary read goes to Slack exactly when
   // there is something new to fetch and costs nothing when there is not.
   function followOpenConversation() {
-    if (!openConversation || !watching) return
+    if (!openConversation || !watching || paused) return
     if (messagesQueued || messagesLoading || messageProc.running) return
     var row = rowFor(String(openConversation.id))
     if (!row || !newerTs(String(row.ts || ""), messagesWitness)) return
@@ -565,7 +612,11 @@ Item {
     // been written, so this can only be a read of what is already there. A
     // tight max-age would turn a poll somebody else has already paid for into
     // a second request to Slack.
-    onFileChanged: root.refresh({ maxAge: 3600 })
+    //
+    // Paused, it is a read of the disk and nothing else: somebody's Refresh in
+    // the bar lands here, and it should reach the window without the window
+    // then going to Slack itself.
+    onFileChanged: root.refresh({ maxAge: 3600, automatic: true, cachedOnly: root.paused })
   }
 
   // `fresh` means go to Slack whatever is on disk. Opening a conversation does

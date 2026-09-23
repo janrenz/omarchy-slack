@@ -155,12 +155,21 @@ BarWidget {
     slotSize: (root.barLabel !== "" || (root.showCount && service.unreadCount > 0))
       ? Style.bar.statusSlot * 2 : Style.bar.iconSlot
     active: root.tintOnUnread && service.unreadCount > 0
+    // Dimmed while the user has paused fetching: a count that has stopped
+    // moving should look like one, or it reads as "nothing new" when it means
+    // "nothing asked".
+    foreground: {
+      var base = root.bar ? root.bar.barForeground : Color.foreground
+      return service.paused ? Qt.rgba(base.r, base.g, base.b, 0.45) : base
+    }
 
     tooltipText: {
       if (!service.configured)
         return "Slack: name this workspace in settings, then paste a token"
       if (service.needsSignIn) return "Slack: paste a token to sign in"
-      if (!service.signedIn) return "Slack: loading…"
+      if (!service.signedIn)
+        return service.paused ? "Slack: fetching is paused — p in the dropdown resumes"
+                              : "Slack: loading…"
       var lines = [Model.plainText(service.view.team || service.alias)]
       lines.push(service.unreadCount === 0
         ? "nothing unread"
@@ -170,7 +179,10 @@ BarWidget {
       if (coverage !== "") lines.push(coverage)
       // A bar that is not moving because nobody is at the machine looks exactly
       // like a bar that is broken. Say which.
-      if (service.pollReason !== "") lines.push(service.pollReason)
+      // The manual pause says how to undo it, because it is the one reason the
+      // user caused and may have forgotten.
+      if (service.paused) lines.push("fetching paused — p in the dropdown resumes")
+      else if (service.pollReason !== "") lines.push(service.pollReason)
       for (var i = 0; i < service.warnings.length; i++)
         lines.push(Model.plainText(service.warnings[i].message))
       return lines.join("\n")

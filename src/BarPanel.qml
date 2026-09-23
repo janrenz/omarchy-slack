@@ -117,7 +117,9 @@ Panel {
     armingMarkAll = false
     list.cursorIndex = -1
     root.controller.show()
-    if (service) service.refresh()
+    // Paused means paused: what the bar last fetched is what the panel shows,
+    // and r is still there for somebody who wants it newer.
+    if (service && !service.paused) service.refresh()
   }
 
   function close() {
@@ -173,6 +175,7 @@ Panel {
         // Any other key is an answer of "no" to a question that was asked.
         root.armingMarkAll = false
         if (text === "r" && root.service) root.service.refresh()
+        else if (text === "p" && root.service) root.service.togglePause()
         else if (text === "o") root.openWindow({})
       }
 
@@ -225,6 +228,7 @@ Panel {
                   : (root.service.unreadCount === 1
                      ? "1 conversation waiting"
                      : root.service.unreadCount + " conversations waiting"))
+                if (root.service.paused) parts.push("paused")
                 return parts.join(" · ")
               }
               textFormat: Text.PlainText
@@ -259,6 +263,20 @@ Panel {
               tooltipText: "Open the window  ·  o"
               foreground: root.fg
               onClicked: root.openWindow({})
+            }
+
+            // Beside Refresh, because the two answer the same question - when
+            // does this ask Slack - one for now and one for until further
+            // notice. Resuming is a fetch of its own; see Service.scheduleRefresh.
+            PanelActionButton {
+              readonly property bool held: !!root.service && root.service.paused
+              iconText: held ? "\u{F040A}" : "\u{F03E4}"   // nf-md-play / nf-md-pause
+              tooltipText: held ? "Resume fetching  ·  p" : "Pause fetching  ·  p"
+              // Lit while paused, since it is the thing to press to undo it.
+              foreground: held ? root.accent : root.fg
+              visible: !!root.service && root.service.configured
+              enabled: !!root.service && !root.service.saving
+              onClicked: if (root.service) root.service.togglePause()
             }
 
             PanelActionButton {
@@ -341,7 +359,9 @@ Panel {
           visible: !!root.service && root.service.configured && !root.service.signedIn
           text: root.service && root.service.needsSignIn
             ? "This workspace needs a token. Opening the window is where it goes."
-            : "Waiting for the first fetch…"
+            : (root.service && root.service.paused
+               ? "Fetching is paused and nothing is saved to show. p resumes, r fetches once."
+               : "Waiting for the first fetch…")
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           color: root.dim
@@ -370,10 +390,16 @@ Panel {
             if (root.armingMarkAll && root.service)
               return "Mark " + root.service.unreadCount + " read?  m confirms  ·  Esc cancels"
             if (root.service && root.service.markingRead) return "Marking read…"
-            var keys = ["o window", "r refresh"]
+            // The pause key is shown while it is the way out, and left to the
+            // button's tooltip otherwise: the line has room for three.
+            var keys = root.service && root.service.paused
+              ? ["p resume", "r refresh", "o window"] : ["o window", "r refresh"]
             // "m read all" rather than "m mark all read": a third key is what
             // this line has room for, and not a word more.
             if (root.canMarkAll) keys.splice(0, 0, "m read all")
+            // Paused with something to mark is four; the window has a button of
+            // its own and loses its place here.
+            if (keys.length > 3) keys.pop()
             return keys.join("  ·  ")
           }
           textFormat: Text.PlainText

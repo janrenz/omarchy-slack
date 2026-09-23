@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "janrenz.omarchy.slack",
   "name": "Slack",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "author": "Jan Renz",
   "license": "MIT",
   "description": "Slack channels, DMs and threads in the Omarchy bar and in a window of their own. Sign in through your browser - no Slack app of your own to create, nothing to paste. Needs python3 (standard library only). Talks to the Slack Web API and nothing else.",
@@ -35,6 +35,7 @@
       "sort": "recent",
       "refreshIntervalSec": 120,
       "pausePolling": true,
+      "paused": false,
       "tintOnUnread": true,
       "showCount": false,
       "avatars": true,
@@ -119,6 +120,13 @@
         "label": "Stop polling while you are away",
         "description": "Slack's rate limits are a budget: a poll costs a search whether or not anybody is at the machine. Nothing is asked of the server while the screen has been idle for five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out either way. On battery the interval is doubled, and tripled in the power-saver profile.",
         "defaultValue": true
+      },
+      {
+        "key": "paused",
+        "type": "boolean",
+        "label": "Pause fetching",
+        "description": "Stops everything that goes to Slack on its own - the poll, presence, and the open conversation following the list - until you switch it off again, whether or not anybody is at the machine. What was last fetched stays on screen and the bar icon dims to say so. Refresh, r, opening a conversation and sending still go out, because you asked for them. Also p in the dropdown and the window, and it is remembered across a restart.",
+        "defaultValue": false
       },
       {
         "key": "icon",

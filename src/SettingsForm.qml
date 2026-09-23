@@ -389,6 +389,16 @@ Column {
     onClicked: root.change("pausePolling", !(root.current("pausePolling", true) !== false))
   }
 
+  // The same setting p flips from the dropdown and the window. Here too,
+  // because a pause somebody has forgotten about is found in settings first.
+  Toggle {
+    width: parent.width
+    label: "Pause fetching"
+    description: "Nothing goes to Slack on its own until you switch this off again - no poll, no presence, no conversation following the list - whether or not you are at the machine. What was last fetched stays on screen and the bar icon dims. Refresh, r, opening a conversation and sending still go out. p does the same from the dropdown and the window."
+    checked: root.current("paused", false) === true
+    onClicked: root.change("paused", !(root.current("paused", false) === true))
+  }
+
   PanelSeparator { width: parent.width }
 
   // ---------------- the bar ----------------

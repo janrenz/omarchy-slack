@@ -2095,6 +2095,17 @@ def cmd_fetch(args):
         if handed:
             out(handed)
 
+    # The user has paused fetching, and the window wants whatever it can paint
+    # without going to Slack. Any age will do - a stale sidebar under a line
+    # saying "paused" is honest, and the alternative is an empty one - and
+    # nothing on disk is an answer, not a reason to ask.
+    if getattr(args, "cached_only", False):
+        handed = cached_snapshot(single, max_age=float("inf")) if single else None
+        if handed:
+            out(handed)
+        out({"ok": False, "error": {"code": "not_cached",
+                                    "message": "Nothing saved to show while paused"}})
+
     if not single:
         fetch_accounts(snapshot, aliases, args)
         out(snapshot)
@@ -4945,6 +4956,9 @@ def main():
     fetch.add_argument("--max-age", type=int, default=0, metavar="SECONDS",
                        help="hand back the last snapshot if it is younger than this, and ask "
                             "Slack nothing")
+    fetch.add_argument("--cached-only", action="store_true",
+                       help="hand back the last snapshot however old it is, or say there is "
+                            "none - never ask Slack. What a paused window paints from")
     fetch.add_argument("--demo", action="store_true", help="synthetic data, for building the layout")
     fetch.set_defaults(func=cmd_fetch)
 

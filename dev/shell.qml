@@ -200,6 +200,13 @@ ShellRoot {
       return String(panel.agentDraft(json))
     }
 
+    // The manual pause, without writing it to the real shell.json the way p
+    // would: the harness's settings are fixtures, and a save goes to the file
+    // the running shell reads.
+    function pause(on: bool): void {
+      panel.settings = Object.assign({}, panel.settings, { paused: on })
+    }
+
     function handovers(on: bool): void {
       panel.settings = Object.assign({}, panel.settings, { agentHandover: on })
     }
@@ -271,7 +278,9 @@ ShellRoot {
         messages: service.messages.length,
         error: service.errorMessage,
         messagesError: service.messagesError,
-        settingsError: panel.settingsError
+        settingsError: panel.settingsError,
+        paused: service.paused,
+        pollReason: service.pollReason
       })
     }
   }

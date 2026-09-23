@@ -403,7 +403,8 @@ focus".
 
 The dropdown behind the bar icon has its own handful, because it holds its own
 one thing: `o` opens the window, `r` refreshes, `m` marks everything read,
-`j`/`k` and `Enter` walk what is waiting, and `Escape` closes it.
+`p` pauses fetching or resumes it, `j`/`k` and `Enter` walk what is waiting,
+and `Escape` closes it.
 
 `m` is asked twice. Slack has no route back to unread, so it is the one thing in
 the dropdown that cannot be undone, and in a popup where every other key is a
@@ -452,6 +453,7 @@ mark it: an offer that would fail is worse than no offer.
 | `u` | Show only what is unread |
 | `m` | Mark this conversation read |
 | `r` | Reload this conversation |
+| `p` | Pause fetching, or resume it — see [When it does not poll](#when-it-does-not-poll) |
 | `c` | Read this channel's canvas, and go back again |
 | `e` | In a canvas: write in it |
 | `,` | Settings |
@@ -502,6 +504,7 @@ is the line that writes it into the registry — so the plugin brings its own.
 | `presence` | `true` | A dot on each DM saying whether they are around. One request per person in view. |
 | `refreshIntervalSec` | `120` | How often to poll (30–3600). |
 | `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
+| `paused` | `false` | Stop everything that goes to Slack on its own until you switch it off again. `p` in the dropdown or the window flips it, and it is remembered across a restart. |
 | `icon` / `label` | `󰓭` | Bar glyph, or text instead of it. |
 | `ipcTarget` | — | A name of your own for the dropdown, so a key can summon it: set `slack` and bind `omarchy-shell slack toggle`. Empty means the dropdown opens by clicking the icon. The window is separate and always answers to `omarchy-shell shell toggle janrenz.omarchy.slack`. |
 | `tintOnUnread` | `true` | Highlight the bar icon while something is unread. |
@@ -546,6 +549,22 @@ power-saver profile.
 Anything you ask for by hand still goes out, offline included: a failure you can
 see beats a silence you cannot. The bar's tooltip says why nothing is moving
 while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
+
+### Pausing it yourself
+
+The gate above guesses. `p` does not: press it in the dropdown or the window,
+or use the pause button beside Refresh, and nothing goes to Slack on its own
+until you press it again — no poll, no presence dots, no open conversation
+catching up with the list. It holds whether or not you are at the machine, and
+whether or not `pausePolling` is on, and it is a setting (`paused`), so it is
+still on after a restart. What was last fetched stays on screen; a shell
+started while paused paints what it has on disk and asks Slack nothing.
+
+The bar icon dims and its tooltip says so, the dropdown's header says
+*paused*, and the button turns into a play button in the accent colour.
+Anything you ask for by hand still goes out: Refresh, `r`, opening a
+conversation, sending, reacting. Resuming fetches straight away rather than at
+the next tick.
 
 ## Your coding agent
 
@@ -920,6 +939,30 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.12.0 — 2026-09-23
+
+- **Fetching can be paused by hand.** The automatic gate stops polling when
+  nobody is at the machine or there is no network; this one stops it because
+  you said so, and holds until you say otherwise. `p` in the dropdown or the
+  window, the pause button beside Refresh, or *Pause fetching* in settings.
+  It stops everything that goes to Slack unasked — the poll, presence, the
+  open conversation following the list, and the refresh that opening the
+  dropdown used to start — and leaves Refresh, `r`, sending and opening a
+  conversation alone, because those are you asking. Resuming fetches at once.
+
+- **It shows.** The bar icon dims and its tooltip says how to undo it, the
+  dropdown's header says *paused*, and the button is a play button in the
+  accent colour while it holds. A pause somebody has forgotten about should
+  not look like a quiet afternoon.
+
+- **A shell started while paused still paints.** It shows the last snapshot on
+  disk, however old, and does not ask Slack for a newer one. With nothing on
+  disk it shows nothing rather than going to fetch.
+
+- **An open window notices a pause set from the dropdown.** The window read the
+  bar layout once per open, so pausing from the bar left an open window polling
+  on its own. It now watches for that one setting changing underneath it.
 
 ### 0.11.1 — 2026-09-16
 

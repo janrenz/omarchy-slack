@@ -445,6 +445,7 @@ which is also why opening the dropdown costs no request.
 | `presence` | boolean | true | |
 | `refreshIntervalSec` | integer | 120 | 30–3600 |
 | `pausePolling` | boolean | true | |
+| `paused` | boolean | false | The manual pause. `p` flips it |
 | `icon` | string | `󰒱` | |
 | `label` | string | `""` | |
 | `ipcTarget` | string | `""` | Names the **dropdown's** IpcHandler |
@@ -509,12 +510,15 @@ the payload. Verified against a real workspace — parents come back with
 ### 8.1 Bar widget (`BarWidget.qml`, 188 lines)
 
 Left click toggles the dropdown, **right click summons the window**, middle click
-refreshes. Elects `notifies` from `bar.moduleWidgets(moduleName)[0]`.
+refreshes. Elects `notifies` from `bar.moduleWidgets(moduleName)[0]`. The icon
+dims while `paused` is on, and the tooltip says `p` resumes.
 
 ### 8.2 Dropdown (`BarPanel.qml`, 371 lines)
 
 What is waiting, and nothing else. Every row is a way into the window. Binds to
 the bar's Service with `unreadOnly` on it, so **opening it fetches nothing**.
+Its keys are `o` (window), `r` (refresh), `m` (mark all read, asked twice) and
+`p` (pause or resume fetching), each with a button in the header.
 
 ### 8.3 Window (`SlackWindow.qml`, 2972 lines)
 
@@ -544,6 +548,7 @@ Beyond the shared set in `PLATFORM.md` §9.1:
 | `/` | Search every message |
 | `f` | Filter the conversations already listed |
 | `m` | Mark this conversation read |
+| `p` | Pause fetching, or resume it — also in the dropdown |
 | `c` | Read this channel's canvas, and go back again |
 | `e` | In a canvas: write in it |
 

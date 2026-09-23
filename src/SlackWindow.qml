@@ -224,6 +224,47 @@ Item {
     }
   }
 
+  // The pause, when somebody else flips it.
+  //
+  // The window reads the bar layout once per open, and the dropdown's p writes
+  // it while the window may be sitting there - so a window left open went on
+  // polling a workspace the user had just paused. The bar's Service is told by
+  // the shell; this one has to look. Only `paused` is taken from what it
+  // reads, on purpose: the dev harness runs this window on fixture settings
+  // with the demo on, and a whole-settings reload on any write to shell.json
+  // would quietly point it at the real workspace instead.
+  readonly property string shellJsonPath: {
+    var set = String(Quickshell.env("XDG_CONFIG_HOME") || "")
+    return (set !== "" ? set : String(Quickshell.env("HOME") || "") + "/.config")
+           + "/omarchy/shell.json"
+  }
+
+  FileView {
+    path: root.settingsLoaded && root.settingsError === "" ? root.shellJsonPath : ""
+    watchChanges: true
+    preload: false
+    onFileChanged: if (!pauseProc.running && root.pluginDir !== "") {
+      pauseProc.command = ["python3", root.pluginDir + "/config.py",
+                           "--plugin-id", root.pluginId, "--list"]
+      pauseProc.running = true
+    }
+  }
+
+  Process {
+    id: pauseProc
+    running: false
+    stdout: StdioCollector { id: pauseOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var parsed = Model.parseJson(pauseOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) return
+      var widgets = parsed.widgets || []
+      if (widgets.length === 0) return
+      var theirs = (widgets[0].settings || {}).paused === true
+      if (theirs === (root.settings.paused === true)) return
+      root.settings = Object.assign({}, root.settings, { paused: theirs })
+    }
+  }
+
   Service {
     id: service
     settings: root.settings
@@ -1097,6 +1138,7 @@ Item {
             if (text === "e") service.editCanvas(false)
             else if (text === "r") service.loadCanvas()
             else if (text === "c") service.toggleCanvas()
+            else if (text === "p") service.togglePause()
             else if (text === "n") root.openSwitcher()
             else if (text === "/") root.openSearch()
             else if (text === ",") root.showSettings = !root.showSettings
@@ -1112,6 +1154,7 @@ Item {
           else if (text === "c") service.toggleCanvas()
           else if (text === "u") service.unreadOnly = !service.unreadOnly
           else if (text === "m") service.markCurrentRead()
+          else if (text === "p") service.togglePause()
           else if (text === "f") root.startFiltering()
           else if (text === "n") root.openSwitcher()
           else if (text === "/") root.openSearch()
@@ -1374,11 +1417,29 @@ Item {
                 onClicked: root.openSwitcher()
               }
 
+              // The same pause the dropdown's p is, and lit the same way while
+              // it holds - the window is where somebody wonders why nothing is
+              // arriving.
+              PanelActionButton {
+                visible: service.configured && !root.showSettings
+                enabled: !service.saving
+                iconText: service.paused ? "\u{F040A}" : "\u{F03E4}"   // nf-md-play / nf-md-pause
+                tooltipText: service.paused
+                  ? "Fetching is paused — resume  (p)"
+                  : "Pause fetching until you resume  (p)"
+                foreground: service.paused ? Color.accent : Color.foreground
+                bordered: true
+                size: unreadButton.height
+                onClicked: service.togglePause()
+              }
+
               PanelActionButton {
                 visible: service.configured && !root.showSettings
                 enabled: !service.loading
                 iconText: "\u{F0450}"   // nf-md-refresh
-                tooltipText: "Read the workspace again"
+                tooltipText: service.paused
+                  ? "Read the workspace again — once, while paused"
+                  : "Read the workspace again"
                 foreground: Color.foreground
                 bordered: true
                 size: unreadButton.height

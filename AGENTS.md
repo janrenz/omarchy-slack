@@ -36,7 +36,8 @@ src/SlackWindow.qml    The window. Sidebar, transcript, message box, and the
                        becomes a path.
 src/Notifier.qml       omarchy-notification-send, the prime-then-announce rule,
                        and the click that opens the conversation.
-src/PollGate.qml       Whether it is worth polling at all: idle, network, battery.
+src/PollGate.qml       Whether it is worth polling at all: idle, network, battery,
+                       and `held` - the user's own pause (the `paused` setting).
 src/handover.sh        Builds the prompt that hands a conversation to the
                        user's coding agent and execs omarchy-agent. Runnable by
                        hand; --print shows the prompt and launches nothing.
@@ -228,6 +229,16 @@ fatal QML error makes it exit instead.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
+- **The manual pause covers more than the timer.** `paused` holds the gate, and
+  every other thing that reaches Slack unasked checks it too: presence after a
+  fetch, `followOpenConversation`, the bootstrap re-poll, the dropdown's
+  refresh-on-open, and the snapshot watch (which becomes `--cached-only`). A new
+  automatic request has to join that list; a new thing somebody presses must
+  not. Decide it when the deferred call runs, not when it is scheduled - see
+  `automaticRefresh` - because the settings that flip `paused` are the same
+  ones whose change handler schedules the refresh, and `paused` has not caught
+  up with them yet inside it. Don't press `p` in the harness to test it: that
+  writes the real `shell.json`. `ipc call dev pause true` sets the fixture.
 - **`Service.qml` is instantiated more than once, and the helper is what makes
   that safe.** `BarWidget.qml` has one and `SlackWindow.qml` has another, and
   the bar is one surface *per monitor* — so a two-monitor desktop with the

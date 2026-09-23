@@ -43,6 +43,7 @@ Column {
     ["u", "Show only what is unread", "Doing"],
     ["m", "Mark this conversation read", "Doing"],
     ["r", "Reload this conversation", "Doing"],
+    ["p", "Pause fetching, or resume it. r still works while paused", "Doing"],
     ["c", "Read this channel's canvas, and go back again", "Doing"],
     ["e", "In a canvas: write in it", "Doing"],
     [",", "Settings", "Doing"],
