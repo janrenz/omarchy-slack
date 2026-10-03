@@ -94,7 +94,8 @@ it. This is the one write where the user has usually already told you the path,
 so read the path back to them before you send it - a wrong file in a channel
 cannot be taken back.
 
-`--demo` on any command answers from fixtures and posts nothing. It is the safe
+`--demo` on any read or write command answers from fixtures and posts nothing
+(the `login-*`, `scheme-*` and housekeeping commands do not take it). It is the safe
 way to check a command's shape when you are unsure.
 
 What the token may actually do is reported by `login-status --account work` and

@@ -142,8 +142,9 @@ Settings live in one object per widget instance inside
 `~/.config/omarchy/shell.json`, under `bar.layout.<section>[]`, keyed by the
 plugin `id`.
 
-- `manifest.json`'s `barWidget.schema` is what the shell's settings panel
-  renders. **Adding a setting means adding it there and reading it through
+- `manifest.json`'s `barWidget.schema` is registered by the shell and
+  rendered by the window's own form (`SettingsForm.qml`); nothing in the shell
+  draws it for a third-party widget. **Adding a setting means adding it there and reading it through
   `setting()`** — one without the other is a setting that either cannot be set
   or has no effect.
 - `barWidget.defaults` is what a freshly added widget gets.

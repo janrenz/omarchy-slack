@@ -16,9 +16,10 @@ import "Model.js" as Model
 // the settings form - stays in the window, and every row here is a way into it
 // rather than a smaller copy of it.
 //
-// Nothing is fetched for this panel. It binds to the Service the bar icon
-// already owns, with `unreadOnly` set on it, so opening the dropdown costs
-// Slack no request at all - see BarWidget.qml.
+// Nothing is fetched for this panel beyond what the bar does. It binds to the
+// Service the bar icon already owns, with `unreadOnly` set on it, and opening
+// it asks for a snapshot no older than half a minute - so opening it twice in
+// a row, or right after a poll, costs Slack nothing. See BarWidget.qml.
 Panel {
   id: root
   moduleName: "janrenz.omarchy.slack"
@@ -119,7 +120,9 @@ Panel {
     root.controller.show()
     // Paused means paused: what the bar last fetched is what the panel shows,
     // and r is still there for somebody who wants it newer.
-    if (service && !service.paused) service.refresh()
+    // Half a minute: the bar that announces polls with no age allowance at
+    // all, and without one every opening was a search against Slack's budget.
+    if (service && !service.paused) service.refresh({ maxAge: 30 })
   }
 
   function close() {

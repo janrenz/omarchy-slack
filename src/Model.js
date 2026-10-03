@@ -78,6 +78,23 @@ function reactionIsMine(reactions, name) {
 // as the plain words it was.
 var LINKABLE = /\b(?:https?:\/\/|www\.)[^\s<>"'\)\]]+|(?:\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b)/g
 
+// A file:// URL - from the file chooser, a drop, a save dialog - as the path
+// the helper wants, or "" when it is not one. decodeURIComponent because a
+// space arrives as %20; caught, because a filename that is not UTF-8 arrives
+// as a %E9 it throws on, and an uncaught throw in a click handler is a button
+// that does nothing and says nothing. A bare absolute path is taken as it is:
+// decoding one would turn a literal % in its name into something else.
+function localPath(url) {
+  var text = String(url === undefined || url === null ? "" : url).trim()
+  if (text.charAt(0) === "/") return text
+  if (text.indexOf("file://") !== 0) return ""
+  try {
+    return decodeURIComponent(text.substring("file://".length))
+  } catch (error) {
+    return ""
+  }
+}
+
 function escapeHtml(text) {
   return String(text === undefined || text === null ? "" : text)
     .replace(/&/g, "&amp;")
@@ -168,22 +185,34 @@ function usableSpans(plain, links) {
 // plugin turns that into a span - but a message that arrives from an app as
 // plain text has bare addresses in it and nothing marking them.
 function autoLinked(plain, tint) {
-  var escaped = escapeHtml(plain)
+  // Matched against the plain text and escaped piece by piece. Matching the
+  // escaped text took the entity a quote or a bracket had become into the
+  // address: `"https://example.com"` linked to `https://example.com&quot`
+  // and left a stray `;` behind it.
+  var text = String(plain === undefined || plain === null ? "" : plain)
+  var out = ""
+  var from = 0
+  var found
   LINKABLE.lastIndex = 0
-  return escaped.replace(LINKABLE, function(match) {
+  while ((found = LINKABLE.exec(text)) !== null) {
+    var match = found[0]
+    var start = found.index
     // Trailing punctuation is nearly always the sentence, not the address.
-    var trail = ""
-    while (match.length > 0 && ".,;:!?".indexOf(match.charAt(match.length - 1)) !== -1) {
-      trail = match.charAt(match.length - 1) + trail
+    while (match.length > 0 && ".,;:!?".indexOf(match.charAt(match.length - 1)) !== -1)
       match = match.substring(0, match.length - 1)
-    }
+    if (match === "") continue
     var href = match
     if (match.indexOf("@") !== -1 && match.indexOf("//") === -1) href = "mailto:" + match
     else if (match.toLowerCase().indexOf("www.") === 0) href = "https://" + match
-    if (tint === "") return '<a href="' + href + '">' + match + '</a>' + trail
-    return '<a href="' + href + '" style="color:' + tint + '">'
-      + '<font color="' + tint + '">' + match + '</font></a>' + trail
-  })
+    out += escapeHtml(text.substring(from, start))
+    var shown = escapeHtml(match)
+    href = escapeHtml(href)
+    if (tint === "") out += '<a href="' + href + '">' + shown + '</a>'
+    else out += '<a href="' + href + '" style="color:' + tint + '">'
+      + '<font color="' + tint + '">' + shown + '</font></a>'
+    from = start + match.length
+  }
+  return out + escapeHtml(text.substring(from))
 }
 
 // ------------------------------------------------------------------ canvases
@@ -270,13 +299,6 @@ function presenceColor(state, palette) {
   }
 }
 
-function presenceLabel(state) {
-  switch (String(state || "")) {
-    case "active": return "Active"
-    case "away":   return "Away"
-    default:       return ""
-  }
-}
 
 // ---------------------------------------------------------------- the account
 
@@ -571,23 +593,11 @@ function switcherRows(query, view, directory, limit) {
 
 // One search result, as a row. The conversation it was in leads, because that
 // is what pressing Enter on it opens.
-// Who to ask about, for the presence dots: the people the sidebar is actually
-// drawing, and nobody else. It is one request each, so the list is short and
-// it is the visible rows rather than the first twenty of four hundred.
-function presenceWanted(view, limit) {
-  var out = []
-  var rows = (view && view.dms) || []
-  for (var i = 0; i < rows.length && out.length < (limit || 20); i++) {
-    var who = String(rows[i].withUserId || "")
-    if (who !== "" && out.indexOf(who) === -1) out.push(who)
-  }
-  return out
-}
-
-// The same thing, but only about the people the sidebar is actually drawing.
+// Who to ask about, for the presence dots: only the people the sidebar is
+// actually drawing.
 //
-// `presenceWanted` walks every direct message in the snapshot, which is up to
-// thirty of them - and the sidebar folds the quiet ones away behind one row,
+// Walking every direct message in the snapshot would be up to thirty of them -
+// and the sidebar folds the quiet ones away behind one row,
 // so most of those are people whose dot is not on screen to be looked at. One
 // request each, against a bucket of fifty a minute. These rows are the ones
 // `conversationRows` produced, headings and the fold row included, so the

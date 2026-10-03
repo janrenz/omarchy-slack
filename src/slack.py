@@ -26,21 +26,26 @@ import base64
 import fcntl
 import hashlib
 import html as html_entities
+import http.client
 import json
 import os
 import re
 import secrets
-import socket
 import stat
-import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+
+# Not imported here: concurrent.futures, subprocess and socket. Every helper
+# run is a fresh process that the window is waiting on, and concurrent.futures
+# alone drags in logging and traceback - tens of milliseconds on every run, for
+# a thread pool most commands never start. Each is imported by the functions
+# that use it instead.
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import emoji as emoji_table  # noqa: E402
@@ -181,7 +186,9 @@ def alias_problem(alias):
     """Why this alias may not be used as a filename, or None."""
     if not alias:
         return "A workspace needs a name"
-    if not re.match(r"^[A-Za-z0-9._-]{1,64}$", alias) or alias in (".", ".."):
+    # fullmatch, not match with a `$`: `$` also matches just before a final
+    # newline, so "work\n" passed and became a filename with a newline in it.
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", alias) or alias in (".", ".."):
         return "Workspace names may use letters, numbers, dot, dash and underscore only"
     return None
 
@@ -208,22 +215,97 @@ def read_json(path, default=None):
         return default
 
 
-def write_json(path, data, private=False):
-    """Write a JSON file, atomically.
+# Which cache roots have already been checked for their mode in this process.
+_TIGHTENED = set()
 
-    `private` sets the mode on the temp file before anything is written into
-    it, so there is never a moment where a token sits on disk world-readable.
+
+def private_dir(directory):
+    """Make a directory, and every missing one above it, readable by us alone.
+
+    Not `os.makedirs(mode=0o700)`: since Python 3.7 that mode applies to the
+    last directory only, and the ones it creates on the way are left at the
+    umask - which made the cache's own root, the one that matters, 0755.
+
+    The cache holds direct-message transcripts, previews of private channels
+    and pictures out of both, so 0700 is the honest mode for it. A cache made
+    by an older copy of this plugin is tightened the first time it is written
+    to: everything below a 0700 root is out of anybody else's reach whatever
+    its own mode says.
+    """
+    if not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent and parent != directory:
+            private_dir(parent)
+        try:
+            os.mkdir(directory, stat.S_IRWXU)
+        except FileExistsError:
+            pass
+    for root in (CACHE_DIR, STATE_DIR):
+        if root in _TIGHTENED:
+            continue
+        if directory == root or directory.startswith(root + os.sep):
+            _TIGHTENED.add(root)
+            try:
+                if stat.S_IMODE(os.stat(root).st_mode) != stat.S_IRWXU:
+                    os.chmod(root, stat.S_IRWXU)
+            except OSError:
+                pass
+
+
+def write_text(path, text, private=False):
+    """Write a file atomically, through a temp file nobody else can name.
+
+    The temp file is unique per write rather than `path + ".tmp"`. Two helper
+    runs write the same cache file all the time - a bar per monitor, plus the
+    window - and with one fixed temp name the first `os.replace` took the file
+    out from under the second, which then died on FileNotFoundError with a
+    traceback where its JSON should have been.
+
+    mkstemp creates it 0600, before anything is written into it, so there is
+    never a moment where a token - or a transcript - sits on disk readable by
+    anybody else. `private` additionally pins the directory, which is what the
+    token store asks for.
     """
     directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
+    private_dir(directory)
     if private:
         os.chmod(directory, stat.S_IRWXU)
-    tmp = path + ".tmp"
-    mode = stat.S_IRUSR | stat.S_IWUSR if private else 0o644
-    handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        json.dump(data, stream)
-    os.replace(tmp, path)
+    handle, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".",
+                                   suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_json(path, data, private=False):
+    """Write a JSON file, atomically. See write_text."""
+    write_text(path, json.dumps(data), private)
+
+
+def write_json_if_changed(path, data):
+    """write_json, unless the file already says exactly this.
+
+    For the caches a poll rewrites every couple of minutes whether or not
+    anything moved. Reading a few kilobytes back is cheaper than writing them,
+    and a file that is not rewritten is one less rename racing the other
+    helpers that read it.
+    """
+    text = json.dumps(data)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            if handle.read() == text:
+                return False
+    except OSError:
+        pass
+    write_text(path, text)
+    return True
 
 
 def read_capped(response, limit=MAX_RESPONSE_BYTES):
@@ -375,6 +457,8 @@ class Slack:
                 self._remember_scopes(response)
                 payload = json.loads(read_capped(response) or b"{}")
         except urllib.error.HTTPError as error:
+            # HTTPError before HTTPException below: it is an answer with a
+            # status, where HTTPException is an answer that broke off.
             self._remember_scopes(error)
             if error.code == 429:
                 # Slack says how long to wait, and it is usually a second or
@@ -392,7 +476,12 @@ class Slack:
                 self.rate_limited = True
                 return False, {"error": "ratelimited", "retry_after": str(wait)}
             return False, {"error": "http_%d" % error.code}
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError,
+                ValueError) as error:
+            # HTTPException is a connection that broke mid-answer - a body
+            # cut short (IncompleteRead), a status line that was not one. It
+            # is not an OSError, so without it here a flaky network became a
+            # traceback instead of the one JSON object the window reads.
             return False, {"error": "unreachable", "detail": str(error)}
 
         if not isinstance(payload, dict):
@@ -507,13 +596,18 @@ def load_account(alias):
     return refreshed(alias, account)
 
 
+def scope_set(scopes):
+    """Slack's "a,b, c" scope string as a set, with nothing empty in it."""
+    return set(str(scopes or "").replace(" ", "").split(",")) - {""}
+
+
 def granted(account, capability):
     """Whether this token carries any of the scopes that capability needs.
 
     Unknown means no. Offering something and failing on every click is worse
     than not offering it, and the window says which scope would fix it.
     """
-    have = set(str((account or {}).get("scopes", "")).replace(" ", "").split(","))
+    have = scope_set((account or {}).get("scopes"))
     return any(scope in have for scope in CAPABILITIES.get(capability, ()))
 
 
@@ -523,7 +617,7 @@ def capability_flags(account):
 
 def missing_scopes(account):
     """The wanted scopes this install did not get, in the README's order."""
-    have = set(str((account or {}).get("scopes", "")).replace(" ", "").split(","))
+    have = scope_set((account or {}).get("scopes"))
     return [scope for scope in WANTED_SCOPES if scope not in have]
 
 
@@ -538,7 +632,7 @@ def token_problem(token, scopes, renewable=False):
     success and then fail on everything afterwards, which is exactly what it
     did. The scopes are what tell them apart, and every response carries them.
     """
-    have = set(str(scopes or "").replace(" ", "").split(",")) - {""}
+    have = scope_set(scopes)
     text = str(token or "")
 
     if have & {"app_configurations:read", "app_configurations:write"}:
@@ -575,9 +669,21 @@ def remember_scopes(alias, account, api):
     """
     if not api.scopes or api.scopes == account.get("scopes"):
         return account
-    account = dict(account, scopes=api.scopes)
-    write_json(state_path(alias), account, private=True)
-    return account
+    # The file is read again under the renewal lock and only `scopes` is
+    # changed in it. Writing back the dict this process loaded at start-up
+    # would put back the token it started with - and a poll is long enough for
+    # another process to have renewed in the meantime, spending the refresh
+    # token this copy still holds. Rolling that back signs the account out at
+    # the next renewal.
+    with RenewalSlot(alias):
+        current = read_json(state_path(alias)) or {}
+        if not current.get("token"):
+            # Signed out while this ran. Writing would sign it back in.
+            return dict(account, scopes=api.scopes)
+        if current.get("scopes") != api.scopes:
+            current["scopes"] = api.scopes
+            write_json(state_path(alias), current, private=True)
+    return dict(account, scopes=api.scopes)
 
 
 # --------------------------------------------------------------------------
@@ -596,8 +702,14 @@ def load_users(alias):
 
 
 def save_users(alias, users, listed_at=None):
-    write_json(cache_path(alias, "users.json"),
-               {"users": users, "listedAt": listed_at if listed_at is not None else 0})
+    # No `listed_at` means this is not the full users.list, only a few
+    # people looked up one by one - which says nothing about when the
+    # directory was last listed. Writing 0 there made the next quick switcher
+    # re-list the whole workspace, two thousand people, for every poll that
+    # had met somebody new.
+    if listed_at is None:
+        listed_at = load_users(alias)[1]
+    write_json(cache_path(alias, "users.json"), {"users": users, "listedAt": listed_at})
 
 
 def user_row(person):
@@ -625,6 +737,8 @@ def resolve_users(api, alias, ids, users=None):
              if i not in known or time.time() - float(known[i].get("at") or 0) > USER_TTL]
 
     if stale:
+        from concurrent.futures import ThreadPoolExecutor
+
         def one(user_id):
             ok, payload = api.call("users.info", {"user": user_id})
             return user_id, (user_row(payload.get("user") or {}) if ok else None)
@@ -671,8 +785,9 @@ def load_marks(alias):
 
 def save_marks(alias, marks, seen):
     # Bounded: a workspace can have thousands of conversations over the years
-    # and this file is only worth what it saves on the next poll.
-    write_json(cache_path(alias, "marks.json"),
+    # and this file is only worth what it saves on the next poll. Unchanged is
+    # the usual case - a quiet poll moves no mark - so it is not rewritten then.
+    write_json_if_changed(cache_path(alias, "marks.json"),
                {"marks": dict(list(marks.items())[-500:]),
                 "seen": dict(list(seen.items())[-500:])})
 
@@ -805,7 +920,7 @@ def fetch_media(url, token, limit=IMAGE_CAP, timeout=30):
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
     except urllib.error.HTTPError as error:
         raise AccountError("image_failed", "Could not read that image (HTTP %d)" % error.code)
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
         raise AccountError("image_failed", "Could not read that image: %s" % error)
 
     if not content_type.startswith("image/"):
@@ -814,12 +929,27 @@ def fetch_media(url, token, limit=IMAGE_CAP, timeout=30):
         raise AccountError("not_an_image",
                            "That link is %s, not an image" % (content_type or "of unknown type"))
 
-    os.makedirs(MEDIA_DIR, exist_ok=True)
     path = media_path_for(url) + IMAGE_TYPES.get(content_type, ".bin")
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as handle:
-        handle.write(body)
-    os.replace(tmp, path)
+    # Through a temp file of its own, for the reason write_text gives: the
+    # same avatar is fetched by every helper that polls at the same moment.
+    # 0600 like the rest of the cache - a picture out of a private channel is
+    # as private as the channel.
+    try:
+        private_dir(MEDIA_DIR)
+        handle, tmp = tempfile.mkstemp(dir=MEDIA_DIR, prefix="." + os.path.basename(path) + ".",
+                                       suffix=".tmp")
+    except OSError as error:
+        raise AccountError("image_failed", "Could not keep that image: %s" % error)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(body)
+        os.replace(tmp, path)
+    except OSError as error:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise AccountError("image_failed", "Could not keep that image: %s" % error)
     return path, False
 
 
@@ -848,6 +978,8 @@ def cache_avatars(token, urls):
             return url, ""
 
     if missing:
+        from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             for url, path in pool.map(one, missing[:40]):
                 if path:
@@ -1007,13 +1139,32 @@ def plain_text(raw, users=None, channels=None):
 # what becomes a link.
 
 
+def mrkdwn_escape(text):
+    """Literal text as mrkdwn: Slack's three escapes, the way it writes them.
+
+    A rich_text element carries what the person typed, unescaped - that is
+    the point of the format. Dropped into mrkdwn as it is, typing
+    `<https://evil|https://bank>` became a link whose label says one address
+    and whose target is another, built out of nothing but somebody's typing.
+    Escaped, ENTITY never sees a `<` in it, and `readable` turns the escapes
+    back into the characters that were typed.
+    """
+    return (str(text or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
 def rich_element(element):
     kind = element.get("type")
     if kind == "text":
-        return str(element.get("text") or "")
+        return mrkdwn_escape(element.get("text"))
     if kind == "link":
-        url = str(element.get("url") or "")
-        label = str(element.get("text") or "")
+        # The address goes through safe_link like every other one, so only
+        # the three characters that would end or split the entity need taking
+        # out of it, and percent-encoding them leaves the same address. The
+        # label is words, and is escaped like any other words.
+        url = (str(element.get("url") or "").replace("<", "%3C").replace(">", "%3E")
+               .replace("|", "%7C"))
+        label = mrkdwn_escape(element.get("text"))
         return "<%s|%s>" % (url, label) if label else "<%s>" % url
     if kind == "user":
         return "<@%s>" % element.get("user_id", "")
@@ -1029,14 +1180,9 @@ def rich_element(element):
 
 
 def rich_section(section):
-    kind = section.get("type")
     inner = "".join(rich_element(e) for e in (section.get("elements") or []))
-    if kind == "rich_text_quote":
+    if section.get("type") == "rich_text_quote":
         return "> " + inner
-    if kind == "rich_text_preformatted":
-        return inner
-    if kind == "rich_text_list":
-        return inner
     return inner
 
 
@@ -1416,16 +1562,24 @@ def sort_rows(rows, prefer_recent):
 
 
 def channel_names(alias, rows):
-    """{id: name} for turning <#C024BE7LK> into #general, cached for the transcript."""
-    names = read_json(cache_path(alias, "channels.json"), None) or {}
-    known = dict(names.get("names") or {})
+    """{id: name} for turning <#C024BE7LK> into #general, cached for the transcript.
+
+    The file is shared with refresh_directory, which keeps the quick
+    switcher's whole channel list in it, so this writes only when a name has
+    actually changed - which on most polls is never - and writes back the
+    `all` and `listedAt` it has just read rather than anything older.
+    """
+    path = cache_path(alias, "channels.json")
+    cached = read_json(path, None) or {}
+    held = dict(cached.get("names") or {})
+    known = dict(held)
     for row in rows:
         if row.get("name"):
             known[row["id"]] = row["name"]
-    write_json(cache_path(alias, "channels.json"),
-               {"names": dict(list(known.items())[-800:]),
-                "listedAt": float(names.get("listedAt") or 0),
-                "all": names.get("all") or []})
+    if known != held:
+        write_json(path, {"names": dict(list(known.items())[-800:]),
+                          "listedAt": float(cached.get("listedAt") or 0),
+                          "all": cached.get("all") or []})
     return known
 
 
@@ -1546,7 +1700,7 @@ def load_previews(alias):
 def save_previews(alias, previews):
     # Newest first, so the trim keeps what a sidebar would draw.
     ordered = sorted(previews.items(), key=lambda row: -float(row[1].get("ts") or 0))
-    write_json(cache_path(alias, "previews.json"), {"previews": dict(ordered[:400])})
+    write_json_if_changed(cache_path(alias, "previews.json"), {"previews": dict(ordered[:400])})
 
 
 def conversation_lists(api, alias, fresh=False):
@@ -1570,13 +1724,26 @@ def conversation_lists(api, alias, fresh=False):
         {"types": "im,mpim", "exclude_archived": "true"},
         "channels", DM_LIST_CAP)
     problem = channel_problem or dm_problem
-    rows = channels + dms
-    if rows:
-        write_json(cache_path(alias, "list.json"), {"rows": rows, "at": time.time()})
-    elif cached.get("rows"):
-        # A refusal is not an empty workspace. Keep what was there.
-        return list(cached["rows"]), problem
-    return rows, problem
+    if not problem:
+        rows = channels + dms
+        if rows:
+            write_json(cache_path(alias, "list.json"), {"rows": rows, "at": time.time()})
+        return rows, problem
+
+    # One half refused. That half is taken from the last list that worked,
+    # if there is one - a refusal is not an empty workspace - and nothing is
+    # written: a list missing its channels, kept for LIST_TTL, would be a
+    # sidebar without channels for a quarter of an hour after one 429.
+    previous = list(cached.get("rows") or [])
+
+    def is_channel(row):
+        return not (row.get("is_im") or row.get("is_mpim"))
+
+    if channel_problem:
+        channels = [row for row in previous if is_channel(row)]
+    if dm_problem:
+        dms = [row for row in previous if not is_channel(row)]
+    return channels + dms, problem
 
 
 def starred_ids(api, alias, account, fresh=False):
@@ -1662,23 +1829,13 @@ def fetch_account(alias, args):
         warnings.append({"scope": "conversations", "message": friendly(listing_problem)})
 
     me_id = str(account.get("userId") or "")
-    users, _ = load_users(alias)
-    users = resolve_users(
-        api, alias,
-        [c.get("user") for c in listed if c.get("is_im")] + [me_id],
-        users)
-
-    rows = [conversation_row(conversation, users, account.get("userName", ""))
-            for conversation in listed]
-    rows = [row for row in rows if row["id"]]
-    stars, stars_problem = starred_ids(api, alias, account,
-                                       fresh=getattr(args, "fresh", False))
-    for row in rows:
-        row["starred"] = row["id"] in stars
-    names = channel_names(alias, rows)
     marks, seen = load_marks(alias)
 
     # ---- what has happened, in one request -------------------------------
+    #
+    # Asked before anybody is named, so that everybody who needs a name - the
+    # people the DMs are with, and the people who spoke - is resolved in one
+    # batch below rather than in two.
     feed, stamps, feed_problem = ({}, {}, "not_asked")
     if granted(account, "search"):
         feed, stamps, feed_problem = activity_feed(api, covered=high_water(seen))
@@ -1692,14 +1849,28 @@ def fetch_account(alias, args):
     elif feed_problem:
         warnings.append({"scope": "search", "message": friendly(feed_problem)})
 
-    previews = load_previews(alias)
-    by_id = {row["id"]: row for row in rows}
-
-    # Everybody who spoke, resolved in one batch rather than one at a time.
+    # Everybody this poll needs a name for, in one batch. Those who spoke
+    # first: resolve_users asks about only so many at once, a first poll can
+    # meet hundreds of DM partners, and an unnamed preview reads worse than an
+    # unnamed row whose name arrives on the next poll.
     users = resolve_users(
         api, alias,
-        mentioned_ids(feed.values()) + [str(m.get("user") or "") for m in feed.values()],
-        users)
+        [me_id] + [str(m.get("user") or "") for m in feed.values()]
+        + mentioned_ids(feed.values())
+        + [c.get("user") for c in listed if c.get("is_im")],
+        load_users(alias)[0])
+
+    rows = [conversation_row(conversation, users, account.get("userName", ""))
+            for conversation in listed]
+    rows = [row for row in rows if row["id"]]
+    stars, stars_problem = starred_ids(api, alias, account,
+                                       fresh=getattr(args, "fresh", False))
+    for row in rows:
+        row["starred"] = row["id"] in stars
+    names = channel_names(alias, rows)
+
+    previews = load_previews(alias)
+    by_id = {row["id"]: row for row in rows}
 
     for channel_id, match in feed.items():
         row = by_id.get(channel_id)
@@ -1710,12 +1881,12 @@ def fetch_account(alias, args):
         ts = str(match.get("ts") or "")
         who, who_id = sender_of(match, users)
         text = plain_text(message_source(match), users, names)[:160]
-        previews[channel_id] = {
-            "ts": ts,
-            "from": "you" if who_id and who_id == me_id else who,
-            "text": text,
-            "at": time.time(),
-        }
+        said = {"ts": ts, "from": "you" if who_id and who_id == me_id else who, "text": text}
+        held = previews.get(channel_id) or {}
+        # Left alone when it says the same thing, `at` included: a quiet
+        # poll then changes nothing in previews.json and does not rewrite it.
+        if any(held.get(key) != value for key, value in said.items()):
+            previews[channel_id] = dict(said, at=time.time())
 
     # Everything else keeps whatever was remembered, so a conversation that
     # said nothing this week still reads as itself rather than going blank.
@@ -1746,6 +1917,26 @@ def fetch_account(alias, args):
            and row["lastFrom"] != "you"]
     ask = by_interest(ask, seen)[:max(1, min(args.conversations, CONVERSATION_CAP))]
 
+    # What the last poll knew, for every row this one does not get an answer
+    # about - past the cap above, or refused below. A read mark on disk was put
+    # there by an earlier answer, and a newest message past it is exactly what
+    # that answer meant by unread. A row with no mark at all was never
+    # answered for, and stays unclaimed rather than lighting up on a guess.
+    def unread_since(row, last_read):
+        row["unread"] = newer(row["ts"], last_read)
+        if row["unread"]:
+            # Counted out of the same search that found them, and never fewer
+            # than one: a conversation that is unread has at least the message
+            # that made it so.
+            waiting = [ts for ts in stamps.get(row["id"], []) if newer(ts, last_read)]
+            row["unreadCount"] = max(1, len(waiting))
+        else:
+            row["unreadCount"] = 0
+
+    for row in rows:
+        if row["ts"] and row["id"] in marks:
+            unread_since(row, marks[row["id"]])
+
     def read_state(row):
         ok, payload = api.call("conversations.info", {"channel": row["id"]})
         if not ok:
@@ -1754,14 +1945,16 @@ def fetch_account(alias, args):
 
     problems = []
     if ask:
+        from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             for channel_id, info, error in pool.map(read_state, ask):
                 row = by_id.get(channel_id)
                 if row is None:
                     continue
                 if error or info is None:
-                    # No answer means no claim: the row keeps whatever the last
-                    # poll knew rather than lighting up on a guess.
+                    # No answer means no new claim: the row keeps what the
+                    # last poll knew, set from the marks above.
                     if error:
                         problems.append(error)
                     continue
@@ -1770,14 +1963,7 @@ def fetch_account(alias, args):
                     last_read = marks.get(channel_id, "0")
                 else:
                     marks[channel_id] = last_read
-                row["unread"] = newer(row["ts"], last_read)
-                if row["unread"]:
-                    # Counted out of the same search that found them, and never
-                    # fewer than one: a conversation that is unread has at
-                    # least the message that made it so.
-                    waiting = [ts for ts in stamps.get(channel_id, [])
-                               if newer(ts, last_read)]
-                    row["unreadCount"] = max(1, len(waiting))
+                unread_since(row, last_read)
 
     # Nothing you said yourself is unread, whatever the timestamps say: Slack
     # moves the read mark for the sender a moment after the message lands, and
@@ -1927,6 +2113,8 @@ def cmd_presence(args):
         }
 
     if stale:
+        from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             for user_id, state in pool.map(ask, stale):
                 if state:
@@ -1984,7 +2172,7 @@ class FetchSlot:
         if not self.path:
             return self
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            private_dir(os.path.dirname(self.path))
             self._handle = open(self.path, "a+")
         except OSError:
             return self
@@ -2046,6 +2234,39 @@ def cached_snapshot(alias, max_age=0, since=0.0):
     return payload
 
 
+def avatars_from_disk(snapshot):
+    """Fill in the faces a snapshot was written without, from the media cache.
+
+    The bar polls with --no-avatars, because it only ever draws a count, and
+    the snapshot it writes is the one the window is handed - so a window that
+    inherited the bar's poll drew every DM without its face. The pictures are
+    almost always on disk already from an earlier poll of the window's own,
+    so this only looks: a stat per row, and no download. A face that is not
+    on disk stays missing until the window's own poll fetches it.
+    """
+    for account in snapshot.get("accounts") or []:
+        rows = [row for key in ("dms", "channels") for row in (account.get(key) or [])
+                if isinstance(row, dict) and row.get("withUserId") and not row.get("avatar")]
+        if not rows:
+            continue
+        try:
+            users = load_users(account.get("alias"))[0]
+        except AccountError:
+            continue
+        for row in rows:
+            url = (users.get(row["withUserId"]) or {}).get("avatar")
+            if url:
+                row["avatar"] = cached_media(url)
+    return snapshot
+
+
+def hand_over(snapshot, args):
+    """Print a snapshot somebody else's poll wrote, with the faces put back."""
+    if getattr(args, "avatars", False):
+        avatars_from_disk(snapshot)
+    out(snapshot)
+
+
 def fetch_accounts(snapshot, aliases, args):
     """Poll each workspace into `snapshot`, and keep the result if it is worth it.
 
@@ -2093,7 +2314,7 @@ def cmd_fetch(args):
     if max_age and single:
         handed = cached_snapshot(single, max_age=max_age)
         if handed:
-            out(handed)
+            hand_over(handed, args)
 
     # The user has paused fetching, and the window wants whatever it can paint
     # without going to Slack. Any age will do - a stale sidebar under a line
@@ -2102,7 +2323,7 @@ def cmd_fetch(args):
     if getattr(args, "cached_only", False):
         handed = cached_snapshot(single, max_age=float("inf")) if single else None
         if handed:
-            out(handed)
+            hand_over(handed, args)
         out({"ok": False, "error": {"code": "not_cached",
                                     "message": "Nothing saved to show while paused"}})
 
@@ -2119,7 +2340,7 @@ def cmd_fetch(args):
         if slot.waited and not fresh:
             handed = cached_snapshot(single, since=slot.since)
             if handed:
-                out(handed)
+                hand_over(handed, args)
         fetch_accounts(snapshot, aliases, args)
     out(snapshot)
 
@@ -2806,7 +3027,7 @@ def fetch_canvas(url, token, timeout=30):
             content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
     except urllib.error.HTTPError as error:
         raise AccountError("canvas_failed", "Could not read that canvas (HTTP %d)" % error.code)
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
         raise AccountError("canvas_failed", "Could not read that canvas: %s" % error)
     if content_type not in ("text/html", "text/plain", ""):
         # An expired token is answered with a sign-in page, cheerfully, with a
@@ -3077,17 +3298,22 @@ def poll_seen(alias, channel):
         return ""
 
 
-def transcript_cache_path(alias, channel, thread):
-    """Where one conversation's - or one thread's - last transcript is kept.
+def scrubbed_name(key):
+    """`key` as a filename in one directory, and nothing else.
 
-    The name is scrubbed rather than trusted: a conversation id comes from the
-    server, and a filename built out of one must not be able to name a path of
-    its own choosing.
+    A separator is dropped rather than replaced, and so is a leading dot: a
+    conversation id comes from the server, and a filename built out of one
+    must not be able to name a path of its own choosing. Shared by the writer
+    and by drop_transcript, so the two cannot disagree about what a record
+    is called.
     """
+    return re.sub(r"[^A-Za-z0-9._-]", "", str(key)).lstrip(".")
+
+
+def transcript_cache_path(alias, channel, thread):
+    """Where one conversation's - or one thread's - last transcript is kept."""
     key = "%s-%s" % (channel, thread) if thread else str(channel)
-    # A separator is dropped rather than replaced, and so is a leading dot: the
-    # result is a name in this one directory and can be nothing else.
-    safe = re.sub(r"[^A-Za-z0-9._-]", "", key).lstrip(".") or "unknown"
+    safe = scrubbed_name(key) or "unknown"
     return cache_path(alias, os.path.join("transcripts", safe + ".json"))
 
 
@@ -3133,7 +3359,7 @@ def drop_transcript(alias, channel):
         directory = os.path.dirname(transcript_cache_path(alias, channel, ""))
     except AccountError:
         return
-    prefix = re.sub(r"[^A-Za-z0-9._-]", "", str(channel))
+    prefix = scrubbed_name(channel)
     if not prefix:
         return
     try:
@@ -3168,11 +3394,31 @@ def transcript_is_current(alias, channel, thread, cached, top, avatars):
     if thread:
         return age < THREAD_TTL
     # Still current while the poll has learned nothing new about this
-    # conversation since it was written.
+    # conversation since it was written - but only while there is a poll to
+    # learn it. `seen` standing still is evidence only if somebody looked:
+    # with polling paused, or the bar not running, nothing moves it, and a
+    # conversation opened by hand was handed a transcript hours old as if it
+    # were current. So the witness counts when a poll has run since the record
+    # was written (the snapshot is newer than it), and otherwise for as long
+    # as a snapshot itself would be believed.
     seen, was = poll_seen(alias, channel), str(cached.get("seen") or "")
     if seen and was:
-        return seen == was
+        if seen != was:
+            return False
+        return age < SNAPSHOT_MAX_AGE or polled_since(alias, float(cached.get("at") or 0))
     return age < TRANSCRIPT_TTL
+
+
+def polled_since(alias, moment):
+    """Whether a poll of this workspace finished after `moment`.
+
+    The snapshot is written at the end of every poll that worked, so its
+    modification time is the last time anybody looked. A stat, not a read.
+    """
+    try:
+        return os.stat(cache_path(alias, "snapshot.json")).st_mtime > moment
+    except (OSError, AccountError):
+        return False
 
 
 def cmd_messages(args):
@@ -3416,7 +3662,7 @@ def post_upload(url, filename, body, timeout=120):
         # A refused redirect, or an answer too long to read. This function
         # reports rather than raises, so its caller can name the file.
         return False, error.message
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as error:
         return False, "the upload could not be sent: %s" % error
 
 
@@ -3474,10 +3720,10 @@ def cmd_upload(args):
     if args.thread:
         params["thread_ts"] = args.thread
     if comment:
-        # Escaped the way a message is: a filename or a comment must not be
-        # able to turn a stray < into somebody else's link.
-        params["initial_comment"] = comment.replace("&", "&amp;").replace(
-            "<", "&lt;").replace(">", "&gt;")
+        # Escaped the way a message is, and by the same function: a stray <
+        # must not become somebody else's link, and a mention the composer
+        # completed has to arrive as a mention rather than as punctuation.
+        params["initial_comment"] = escape_outgoing(comment)
     ok, completed = api.call("files.completeUploadExternal", params)
     if not ok:
         code = completed.get("error", "")
@@ -3645,7 +3891,10 @@ def refresh_directory(api, alias, account):
                 "member": bool(row.get("is_member")),
                 "topic": str((row.get("topic") or {}).get("value") or ""),
             } for row in rows if row.get("id")]
-            names = dict(cached.get("names") or {})
+            # Read again rather than reusing `cached`: the paged list above
+            # takes seconds, and a poll may have added names meanwhile.
+            latest = read_json(cache_path(alias, "channels.json"), None) or {}
+            names = dict(latest.get("names") or {})
             for row in channels:
                 names[row["id"]] = row["name"]
             write_json(cache_path(alias, "channels.json"),
@@ -4014,6 +4263,8 @@ def scheme_registered():
         return False
     if ("Exec=%s " % handler_path()) not in body:
         return False
+    import subprocess
+
     try:
         answer = subprocess.run(["xdg-mime", "query", "default", SCHEME_MIME],
                                 capture_output=True, text=True, timeout=10)
@@ -4076,7 +4327,8 @@ def oauth_call(params):
             payload = json.loads(read_capped(response) or b"{}")
     except urllib.error.HTTPError as error:
         raise AccountError("exchange_failed", "Slack answered %d to the sign-in" % error.code)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError,
+            ValueError) as error:
         raise AccountError("unreachable", "Could not reach Slack: %s" % error)
     if not isinstance(payload, dict):
         raise AccountError("bad_response", "Slack sent something that was not an answer")
@@ -4132,6 +4384,8 @@ def wait_for_scheme(state, timeout=SIGN_IN_TIMEOUT, finish=None):
         except OSError:
             pass
 
+    import socket
+
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         server.bind(path)
@@ -4186,6 +4440,8 @@ def wait_for_scheme(state, timeout=SIGN_IN_TIMEOUT, finish=None):
 
 def _socket_is_live(path):
     """Whether something is actually listening on that socket file."""
+    import socket
+
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(1)
     try:
@@ -4234,6 +4490,8 @@ def capture_register():
     except OSError as error:
         raise AccountError("register_failed",
                            "Could not write the desktop entry: %s" % error)
+
+    import subprocess
 
     notes = []
     for command in (["update-desktop-database", applications_dir()],
@@ -4422,11 +4680,22 @@ def refreshed(alias, account):
         refresh = str(current.get("refreshToken") or "")
         if not refresh:
             return current
-        payload = oauth_call({
-            "client_id": str(current.get("clientId") or ""),
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-        })
+        try:
+            payload = oauth_call({
+                "client_id": str(current.get("clientId") or ""),
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+            })
+        except AccountError as error:
+            # Slack refusing the renewal - invalid_grant, a revoked app - is a
+            # sign-in that is over, and auth_required is the one code the
+            # window answers by offering a new one. Under its own code it read
+            # as an error with no way out. Not being able to reach Slack is
+            # different: the refresh token is still good, and the next poll
+            # will try it again.
+            if error.code == "exchange_failed":
+                raise AccountError("auth_required", error.message)
+            raise
         # The two grants answer in two shapes, and only one of them nests.
         # Exchanging an authorization code describes both the app and the
         # person, so the user's token is under `authed_user`; refreshing is
@@ -4464,7 +4733,10 @@ class RenewalSlot:
     the lock must not sign the account out for good.
     """
 
-    WAIT = 20.0
+    # Longer than oauth_call's own 30-second timeout, so that a waiter never
+    # gives up on a renewal that is still legitimately in flight and then
+    # spends the same refresh token itself.
+    WAIT = 40.0
 
     def __init__(self, alias):
         try:
@@ -4477,7 +4749,7 @@ class RenewalSlot:
         if not self.path:
             return self
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            private_dir(os.path.dirname(self.path))
             self._handle = open(self.path, "a+")
         except OSError:
             return self
@@ -5091,11 +5363,21 @@ def main():
     with_account("remove", "forget a workspace and everything cached about it").set_defaults(
         func=cmd_remove)
 
+    # Outside the catch-all below on purpose: arguments that cannot be used
+    # are the one failure invariant 5 says exits non-zero, and argparse's 2
+    # is that exit.
     args = parser.parse_args()
     try:
         args.func(args)
     except AccountError as error:
         fail(error.code, error.message)
+    except Exception as error:  # noqa: BLE001 - the last resort, deliberately broad
+        # Whatever was not foreseen still ends as the one JSON object the
+        # window reads, not as a traceback on stderr and an empty stdout that
+        # leaves a spinner turning. SystemExit, which is how out() finishes,
+        # is not an Exception and passes straight through.
+        fail("internal", "Something went wrong inside the plugin: %s: %s"
+             % (type(error).__name__, error))
 
 
 if __name__ == "__main__":

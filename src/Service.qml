@@ -119,7 +119,43 @@ Item {
   // the same question - and this one might not: the settings arriving is
   // itself a reason to refresh, and the fetch already running was started
   // before them.
-  property bool refreshQueued: false
+  //
+  // Kept as the options it was asked with, not as a flag. A flag replayed as
+  // a bare refresh(): a `fresh` read after joining a channel came back as a
+  // shared one that could not know about the join yet, and a paused shell's
+  // disk-only read came back as a real poll - the pause leaking through the
+  // one door that did not check it.
+  property var queuedRefresh: null
+
+  // Two requests folded into one that answers both: fresh if either wanted
+  // it, automatic and disk-only only if both were, and the tighter age.
+  function mergeRefresh(a, b) {
+    if (!a) return b
+    var ageA = a.maxAge === undefined ? shareAge : a.maxAge
+    var ageB = b.maxAge === undefined ? shareAge : b.maxAge
+    return {
+      fresh: a.fresh === true || b.fresh === true,
+      automatic: a.automatic === true && b.automatic === true,
+      cachedOnly: a.cachedOnly === true && b.cachedOnly === true,
+      maxAge: Math.min(ageA, ageB)
+    }
+  }
+
+  // Run on every way a fetch can end, failures included - a Refresh pressed
+  // during a poll that then failed used to be dropped and never run. Whether
+  // an automatic one may still go out is decided now, the same way
+  // automaticRefresh decides it: the pause may have flipped while it waited.
+  function replayQueuedRefresh() {
+    var wants = queuedRefresh
+    if (!wants || fetchProc.running) return
+    queuedRefresh = null
+    if (wants.automatic === true && paused) {
+      if (!painted) refresh({ automatic: true, cachedOnly: true })
+      return
+    }
+    if (wants.automatic === true) wants.cachedOnly = false
+    refresh(wants)
+  }
 
   // How old a snapshot may be and still be worth handing straight back.
   //
@@ -143,8 +179,8 @@ Item {
   function refresh(options) {
     if (!configured || pluginDir === "") return
     var wants = options || {}
-    if (fetchProc.running) { refreshQueued = true; return }
-    refreshQueued = false
+    if (fetchProc.running) { queuedRefresh = mergeRefresh(queuedRefresh, wants); return }
+    queuedRefresh = null
     fetchAutomatic = wants.automatic === true
     fetchCachedOnly = wants.cachedOnly === true
     loading = true
@@ -186,6 +222,7 @@ Item {
     onExited: function(exitCode) {
       root.loading = false
       root.signedInWaiting = false
+      Qt.callLater(root.replayQueuedRefresh)
       if (exitCode !== 0) {
         root.errorCode = "helper_failed"
         root.errorMessage = Model.oneLine(fetchErr.text || "The helper could not be run", 160)
@@ -199,13 +236,19 @@ Item {
       }
       // Nothing on disk to paint while paused. Not an error anybody has to
       // read: the panel says it is paused, and whatever it showed stays.
-      if (root.fetchCachedOnly && parsed.cached !== true) {
-        if (root.refreshQueued) Qt.callLater(root.refresh)
-        return
-      }
+      if (root.fetchCachedOnly && parsed.cached !== true) return
       root.errorCode = ""
       root.errorMessage = ""
-      root.snapshot = parsed
+      // Only when something in it moved. `view`, the sidebar's Repeaters and
+      // the dropdown's on every monitor all hang off this one property, and a
+      // poll that found nothing new - most of them - used to rebuild every
+      // row anyway, up to three times in the window: its own fetch, the
+      // snapshot watch hearing that fetch's write, and presence. `accounts` is
+      // everything accountView reads; the envelope around it carries a fresh
+      // timestamp every time and would never compare equal.
+      if (!root.snapshot
+          || JSON.stringify(root.snapshot.accounts) !== JSON.stringify(parsed.accounts))
+        root.snapshot = parsed
       root.painted = true
       // Announced whether this snapshot was earned here or read off disk.
       // There is exactly one service that speaks - see `notifies`, elected in
@@ -232,7 +275,6 @@ Item {
       // The list has just moved, and the conversation being read may be one
       // of the rows that moved with it.
       root.followOpenConversation()
-      if (root.refreshQueued) Qt.callLater(root.refresh)
     }
   }
 
@@ -397,9 +439,26 @@ Item {
     var switched = lastAlias !== "" && lastAlias !== alias
     lastAlias = alias
     notifier.forget()
-    if (switched) { snapshot = null; closeConversation() }
+    if (switched) {
+      snapshot = null
+      closeConversation()
+      // Everything else that was about the old workspace. A queued mark would
+      // otherwise be sent with the new token against the old one's channel
+      // ids, and a directory or a set of search results would answer for
+      // people who are not there.
+      markQueue = []
+      drafts = ({})
+      presenceByUser = ({})
+      directory = ({ people: [], channels: [] })
+      mentionPeople = []
+      searchResults = []
+    }
   }
-  onSignedInChanged: if (!signedIn) { notifier.forget(); closeConversation() }
+  // Only a token that no longer works, not any snapshot that failed. A cold
+  // cache and a network that dropped out for one poll also come back
+  // `ok: false` - `unreachable`, `list_failed` - and closing on those threw
+  // away the conversation being read and the draft being typed into it.
+  onNeedsSignInChanged: if (needsSignIn) { notifier.forget(); closeConversation() }
 
   function announceNew() {
     var rows = (view.dms || []).concat(view.channels || [])
@@ -464,7 +523,10 @@ Item {
       var parsed = Model.parseJson(presenceOut.text, null)
       // A dot nobody can draw is not worth an error anybody has to read.
       if (exitCode !== 0 || !parsed || parsed.ok === false) return
-      root.presenceByUser = parsed.presence || ({})
+      // Compared for the same reason as the snapshot: every row reads it.
+      var presence = parsed.presence || ({})
+      if (JSON.stringify(presence) !== JSON.stringify(root.presenceByUser))
+        root.presenceByUser = presence
     }
   }
 
@@ -524,6 +586,13 @@ Item {
   // message; the second must not take the view away from somebody reading
   // further up.
   property bool messagesUnasked: false
+  // The read in flight has been overtaken - another conversation was opened,
+  // or this one closed - and was told to stop. Quickshell still delivers its
+  // `exited`, with its output, before the next one starts; without this a
+  // conversation clicked past landed under the next one's header, or took its
+  // spinner away early. A flag rather than a count: close-then-open stops the
+  // same process twice, and it exits once.
+  property bool messagesSuperseded: false
 
   function newerTs(candidate, against) {
     var x = parseFloat(candidate)
@@ -651,7 +720,7 @@ Item {
     // have swallowed it.
     var witness = rowFor(String(row.id))
     messagesWitness = witness ? String(witness.ts || "") : ""
-    if (messageProc.running) messageProc.running = false
+    stopMessages()
     var command = ["python3", helper(), "messages", "--account", alias,
                    "--channel", String(row.id), "--top", "40"]
     if (String(thread || "") !== "") command = command.concat(["--thread", String(thread)])
@@ -670,10 +739,12 @@ Item {
       closeConversation()
       return
     }
+    stashDraft()
     openConversation = row
     threadTs = ""
     threadParent = null
     anchorTs = String(anchor || "")
+    alsoToChannel = false
     // Another conversation's canvas is not this one's, and the transcript that
     // is about to land says whether this one has any.
     canvasFileId = ""
@@ -683,7 +754,7 @@ Item {
     forgetCanvasEdit()
     // A different conversation, so what is on screen belongs to the last one.
     messages = []
-    draft = ""
+    restoreDraft()
     fetchMessages(row, "", anchorTs)
 
     // Opening a conversation is reading it - but only when there was something
@@ -763,7 +834,19 @@ Item {
 
   property bool markOnLoad: false
 
+  function stopMessages() {
+    if (!messageProc.running) return
+    messagesSuperseded = true
+    messageProc.running = false
+  }
+
   function closeConversation() {
+    stashDraft()
+    stopMessages()
+    if (canvasProc.running) { canvasSuperseded = true; canvasProc.running = false }
+    canvasLoading = false
+    messagesLoading = false
+    markOnLoad = false
     openConversation = null
     threadTs = ""
     threadParent = null
@@ -787,20 +870,27 @@ Item {
   function openThread(parentTs, parentRow) {
     var ts = String(parentTs || "")
     if (ts === "" || !openConversation) return
+    // Already in it. A second delivery of the same deep link or agent draft
+    // used to re-read the thread from nothing and reset the box under it.
+    if (threadTs === ts) { if (parentRow) threadParent = parentRow; return }
+    stashDraft()
     threadTs = ts
     threadParent = parentRow || null
     anchorTs = ""
     messages = []
-    draft = ""
+    alsoToChannel = false
+    restoreDraft()
     fetchMessages(openConversation, ts, "")
   }
 
   function closeThread() {
     if (threadTs === "") return
+    stashDraft()
     threadTs = ""
     threadParent = null
     messages = []
-    draft = ""
+    alsoToChannel = false
+    restoreDraft()
     fetchMessages(openConversation, "", "")
   }
 
@@ -818,6 +908,7 @@ Item {
     stdout: StdioCollector { id: messageOut; waitForEnd: true }
     stderr: StdioCollector { id: messageErr; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.messagesSuperseded) { root.messagesSuperseded = false; return }
       root.messagesLoading = false
       var parsed = Model.parseJson(messageOut.text, null)
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
@@ -879,6 +970,8 @@ Item {
   property var canvas: null
   property bool canvasOpen: false
   property bool canvasLoading: false
+  // As messagesSuperseded, for the canvas read.
+  property bool canvasSuperseded: false
   property string canvasError: ""
 
   readonly property bool hasCanvas: canvasFileId !== ""
@@ -902,7 +995,7 @@ Item {
 
   function loadCanvas() {
     if (!openConversation || canvasFileId === "" || pluginDir === "") return
-    if (canvasProc.running) canvasProc.running = false
+    if (canvasProc.running) { canvasSuperseded = true; canvasProc.running = false }
     canvasError = ""
     canvasLoading = true
     var command = ["python3", helper(), "canvas", "--account", alias,
@@ -918,6 +1011,7 @@ Item {
     stdout: StdioCollector { id: canvasOut; waitForEnd: true }
     stderr: StdioCollector { id: canvasErr; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.canvasSuperseded) { root.canvasSuperseded = false; return }
       root.canvasLoading = false
       var parsed = Model.parseJson(canvasOut.text, null)
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
@@ -1094,9 +1188,20 @@ Item {
     if (demo) return
     if (!canMarkRead) return
     // Already going to be marked. A second entry would be a second request
-    // saying the same thing, and the newest ts is the one already queued.
-    for (var i = 0; i < markQueue.length; i++)
-      if (String(markQueue[i].id) === channel) return
+    // saying the same thing - but a newer ts replaces the queued one, or a
+    // message that arrived while "mark all" was working through the queue
+    // stayed unread on Slack. The head is in flight and is left alone; its
+    // conversation is simply queued again behind it.
+    for (var i = 0; i < markQueue.length; i++) {
+      if (String(markQueue[i].id) !== channel) continue
+      if (Number(stamp) <= Number(markQueue[i].ts)) return
+      if (i > 0 || !markReadProc.running) {
+        var queue = markQueue.slice()
+        queue[i] = { id: channel, ts: stamp }
+        markQueue = queue
+        return
+      }
+    }
     markQueue = markQueue.concat([{ id: channel, ts: stamp }])
     pumpMarkRead()
   }
@@ -1117,8 +1222,14 @@ Item {
         enqueueMark(String(rows[i].id || ""), String(rows[i].ts || ""))
   }
 
+  // The entry the request in flight was built from. The queue can be emptied
+  // and refilled under it - a workspace switch - and slicing blindly on exit
+  // would then drop the new head unsent.
+  property var markInFlight: null
+
   function pumpMarkRead() {
     if (markReadProc.running || markQueue.length === 0) return
+    markInFlight = markQueue[0]
     markReadProc.command = ["python3", helper(), "mark-read", "--account", alias,
                             "--channel", String(markQueue[0].id),
                             "--ts", String(markQueue[0].ts)]
@@ -1196,7 +1307,8 @@ Item {
         return
       }
       root.markReadError = ""
-      root.markQueue = root.markQueue.slice(1)
+      if (root.markQueue.length > 0 && root.markQueue[0] === root.markInFlight)
+        root.markQueue = root.markQueue.slice(1)
       if (root.markQueue.length > 0) { root.pumpMarkRead(); return }
       // The mark lives in the conversation list, which this has just changed
       // on the server; re-read it so the list agrees with what was done. Once,
@@ -1208,6 +1320,45 @@ Item {
   // ---- sending -----------------------------------------------------------
 
   property string draft: ""
+  // What was typed and not sent, per conversation and per thread. One box
+  // used to serve all of them and was emptied on every move: a second Escape
+  // out of a thread, `t` on a message, or another conversation clicked threw
+  // away whatever was half-written there. Kept in memory only - a draft is not
+  // something to leave on disk for the next person at this account.
+  property var drafts: ({})
+
+  function draftKey() {
+    return openConversation ? String(openConversation.id) + ":" + threadTs : ""
+  }
+
+  function stashDraft() {
+    var key = draftKey()
+    if (key === "") return
+    var kept = Object.assign({}, drafts)
+    if (draft.trim() === "") delete kept[key]
+    else kept[key] = draft
+    drafts = kept
+  }
+
+  function restoreDraft() {
+    var key = draftKey()
+    draft = key !== "" && drafts[key] !== undefined ? String(drafts[key]) : ""
+  }
+
+  // A send or upload that went out takes its own words out of the box - and
+  // only those. The box stays live while it is in flight, so somebody may
+  // have typed the next message already, or moved to another conversation.
+  function forgetSent(key, text) {
+    if (drafts[key] !== undefined) {
+      var kept = Object.assign({}, drafts)
+      delete kept[key]
+      drafts = kept
+    }
+    if (draftKey() === key && draft === text) draft = ""
+  }
+
+  property string sentKey: ""
+  property string sentText: ""
   property bool sending: false
   property string sendError: ""
   // A thread reply that also lands in the channel, which is Slack's "also send
@@ -1219,6 +1370,8 @@ Item {
     if (!canPost) { sendError = "This token cannot post messages"; return }
     sending = true
     sendError = ""
+    sentKey = draftKey()
+    sentText = draft
     var command = ["python3", helper(), "send", "--account", alias,
                    "--channel", String(openConversation.id), "--stdin"]
     if (threadTs !== "") {
@@ -1242,6 +1395,8 @@ Item {
   // What was sent, for a line that says so. Cleared by the next attempt.
   property string uploadNotice: ""
   property string uploadPath: ""
+  property string uploadKey: ""
+  property string uploadComment: ""
 
   function uploadFile(path) {
     var file = String(path || "").trim()
@@ -1262,6 +1417,8 @@ Item {
     uploadError = ""
     uploadNotice = ""
     uploadPath = file
+    uploadKey = draftKey()
+    uploadComment = draft
     var command = ["python3", helper(), "upload", "--account", alias,
                    "--channel", String(openConversation.id), "--stdin"]
     if (threadTs !== "") command = command.concat(["--thread", threadTs])
@@ -1280,7 +1437,7 @@ Item {
     // is what Slack itself does when you drop a file on a conversation with
     // something already typed.
     onStarted: uploadProc.write(JSON.stringify({
-      file: root.uploadPath, comment: root.draft
+      file: root.uploadPath, comment: root.uploadComment
     }) + "\n")
     onExited: function(exitCode) {
       root.uploading = false
@@ -1294,7 +1451,7 @@ Item {
         return
       }
       root.uploadNotice = "Sent " + String(parsed.title || "that file")
-      root.draft = ""
+      root.forgetSent(root.uploadKey, root.uploadComment)
       root.reloadConversation(true)
       root.refresh()
     }
@@ -1309,7 +1466,7 @@ Item {
     stdinEnabled: true
     stdout: StdioCollector { id: sendOut; waitForEnd: true }
     stderr: StdioCollector { id: sendErrOut; waitForEnd: true }
-    onStarted: sendProc.write(JSON.stringify({ text: root.draft }) + "\n")
+    onStarted: sendProc.write(JSON.stringify({ text: root.sentText }) + "\n")
     onExited: function(exitCode) {
       root.sending = false
       var parsed = Model.parseJson(sendOut.text, null)
@@ -1321,7 +1478,8 @@ Item {
         // blinked is the one failure they cannot recover from.
         return
       }
-      root.draft = ""
+      root.forgetSent(root.sentKey, root.sentText)
+      root.alsoToChannel = false
       root.reloadConversation(true)
       root.refresh()
     }
@@ -1401,9 +1559,17 @@ Item {
 
   readonly property var switcherRows: Model.switcherRows(switcherQuery, view, directory, 12)
 
+  // What the lookup in flight was asked. Typing on while it runs only moves
+  // switcherQuery; the answer then re-asks for whatever is wanted by the time
+  // it lands, or "ab" typed over with "xy" left the list filtering the "ab"
+  // answer by "xy" - empty, and nothing asking again. The same pattern guards
+  // the mention lookup and search below.
+  property string directoryAsked: ""
+
   function lookUp(query) {
     switcherQuery = String(query || "")
     if (directoryProc.running || pluginDir === "" || !configured) return
+    directoryAsked = switcherQuery
     directoryLoading = true
     var command = ["python3", helper(), "directory", "--account", alias,
                    "--query", switcherQuery]
@@ -1428,6 +1594,8 @@ Item {
       }
       root.directoryError = String(parsed.warning || "")
       root.directory = { people: parsed.people || [], channels: parsed.channels || [] }
+      if (root.directoryAsked !== root.switcherQuery)
+        Qt.callLater(function() { root.lookUp(root.switcherQuery) })
     }
   }
 
@@ -1443,14 +1611,22 @@ Item {
   property var mentionPeople: []
   property string mentionQuery: ""
   property bool mentionLoading: false
+  property string mentionAsked: ""
+  // Bumped by clearMentions, so an answer for a list that has since been
+  // closed is not put back under the composer.
+  property int mentionEpoch: 0
+  property int mentionAskedEpoch: 0
 
   function lookUpMention(query) {
     var wanted = String(query || "")
-    // The lookup is debounced by the window; this guard is for the answer
-    // arriving after the fragment has moved on, which would otherwise offer
-    // matches for something nobody is typing any more.
+    // The lookup is debounced by the window. An answer that arrives after the
+    // fragment has moved on is dropped and the current fragment asked for
+    // instead, which would otherwise offer matches for something nobody is
+    // typing any more.
     mentionQuery = wanted
     if (mentionProc.running || pluginDir === "" || !configured) return
+    mentionAsked = wanted
+    mentionAskedEpoch = mentionEpoch
     mentionLoading = true
     var command = ["python3", helper(), "directory", "--account", alias,
                    "--query", wanted]
@@ -1462,6 +1638,7 @@ Item {
   function clearMentions() {
     mentionPeople = []
     mentionQuery = ""
+    mentionEpoch++
   }
 
   Process {
@@ -1471,6 +1648,11 @@ Item {
     stderr: StdioCollector { id: mentionErrOut; waitForEnd: true }
     onExited: function(exitCode) {
       root.mentionLoading = false
+      if (root.mentionAskedEpoch !== root.mentionEpoch) return
+      if (root.mentionAsked !== root.mentionQuery) {
+        Qt.callLater(function() { root.lookUpMention(root.mentionQuery) })
+        return
+      }
       var parsed = Model.parseJson(mentionOut.text, null)
       // A directory that cannot be read is a completion that does not appear.
       // Saying so under the composer would be a line of error text under
@@ -1551,6 +1733,7 @@ Item {
   property bool searching: false
   property string searchError: ""
   property string searchQuery: ""
+  property string searchAsked: ""
 
   function searchMessages(query) {
     var text = String(query || "").trim()
@@ -1562,6 +1745,7 @@ Item {
       return
     }
     if (searchProc.running || pluginDir === "") return
+    searchAsked = text
     searching = true
     var command = ["python3", helper(), "search", "--account", alias, "--query", text]
     if (demo) command.push("--demo")
@@ -1582,6 +1766,12 @@ Item {
     stderr: StdioCollector { id: searchErrOut; waitForEnd: true }
     onExited: function(exitCode) {
       root.searching = false
+      // Cleared while it ran: nothing to show. Moved on: ask again.
+      if (root.searchAsked !== root.searchQuery) {
+        if (root.searchQuery !== "")
+          Qt.callLater(function() { root.searchMessages(root.searchQuery) })
+        return
+      }
       var parsed = Model.parseJson(searchOut.text, null)
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
         root.searchError = parsed && parsed.error
@@ -1704,6 +1894,8 @@ Item {
     stdout: StdioCollector { id: signInUrlOut; waitForEnd: true }
     stderr: StdioCollector { id: signInUrlErr; waitForEnd: true }
     onExited: function(exitCode) {
+      // Cancelled while the URL was being made: no browser, no listener.
+      if (!root.browserSignIn) return
       var parsed = Model.parseJson(signInUrlOut.text, null)
       if (exitCode !== 0 || !parsed || parsed.ok === false) {
         root.signingIn = false
@@ -1728,6 +1920,10 @@ Item {
     stdout: StdioCollector { id: signInWaitOut; waitForEnd: true }
     stderr: StdioCollector { id: signInWaitErr; waitForEnd: true }
     onExited: function(exitCode) {
+      // Stopped by cancelBrowserSignIn, which has already said what it needs
+      // to. Reporting "the sign-in did not finish" to somebody who has just
+      // pressed Cancel reads as a failure they did not have.
+      if (!root.browserSignIn) return
       root.signingIn = false
       root.browserSignIn = false
       var parsed = Model.parseJson(signInWaitOut.text, null)
@@ -1762,9 +1958,9 @@ Item {
 
   function cancelBrowserSignIn() {
     if (!browserSignIn) return
+    browserSignIn = false
     signInWaitProc.running = false
     signingIn = false
-    browserSignIn = false
     signInMessage = ""
   }
 

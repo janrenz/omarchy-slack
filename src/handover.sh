@@ -25,21 +25,49 @@ message=""
 task=""
 print=false
 
+usage() {
+  echo "Usage: handover.sh --account <alias> --channel <id> [--title t] [--thread ts] [--message ts] [--task t] [--print]" >&2
+  exit 1
+}
+
+# An option that takes a value has to be given one, even an empty one. `shift
+# 2` past the end of the arguments fails, and under `set -e` that ended the
+# script with no word about why - a trailing `--title` looked like a handover
+# that silently did nothing.
+needs_value() {
+  if (($# < 2)); then
+    echo "$1 needs a value" >&2
+    usage
+  fi
+}
+
 while (($#)); do
   case "$1" in
-    --account) account=${2:?--account needs a value}; shift 2 ;;
-    --channel) channel=${2:?--channel needs a value}; shift 2 ;;
-    --title)   title=${2-}; shift 2 ;;
-    --thread)  thread=${2-}; shift 2 ;;
-    --message) message=${2-}; shift 2 ;;
-    --task)    task=${2-}; shift 2 ;;
+    --account) needs_value "$@"; account=$2; shift 2 ;;
+    --channel) needs_value "$@"; channel=$2; shift 2 ;;
+    --title)   needs_value "$@"; title=$2; shift 2 ;;
+    --thread)  needs_value "$@"; thread=$2; shift 2 ;;
+    --message) needs_value "$@"; message=$2; shift 2 ;;
+    --task)    needs_value "$@"; task=$2; shift 2 ;;
     --print)   print=true; shift ;;
     *) echo "Unexpected argument: $1" >&2; exit 1 ;;
   esac
 done
 
 if [[ -z $account || -z $channel ]]; then
-  echo "Usage: handover.sh --account <alias> --channel <id> [--title t] [--thread ts] [--message ts] [--task t] [--print]" >&2
+  usage
+fi
+
+# Both go into a command line the agent is told to run, unquoted, so they are
+# held to what an alias and a Slack id can actually be. slack.py refuses
+# anything else as an alias anyway; checking here means a crafted value never
+# reaches a prompt that an agent with a shell will act on.
+if [[ ! $account =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "That workspace alias is not one slack.py would accept: $account" >&2
+  exit 1
+fi
+if [[ ! $channel =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "That conversation id is not one Slack would send: $channel" >&2
   exit 1
 fi
 

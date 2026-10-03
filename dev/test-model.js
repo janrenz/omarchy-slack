@@ -19,10 +19,10 @@ const Model = new Function(
     "; return { accountView, conversationRows, conversationRow, selectableRows, groupMessages, " +
     "whenLabel, dayLabel, subtitleFor, oneLine, plainText, parseJson, linkify, hasLink, " +
     "escapeHtml, usableSpans, safeHref, densityScale, densityNames, sortNames, reactionIsMine, " +
-    "presenceColor, presenceLabel, presenceWanted, presenceWantedFromRows, " +
+    "presenceColor, presenceWantedFromRows, " +
     "switcherRows, searchRows, fileLabel, " +
     "threadLabel, coverageLabel, previewMarkdown, canvasNote, " +
-    "mentionSpan, insertMention, mentionRows }"
+    "mentionSpan, insertMention, mentionRows, localPath }"
 )()
 
 let passed = 0
@@ -272,19 +272,8 @@ test("presence arrives separately and is keyed by the person", () => {
      "away")
 })
 
-test("only the people the sidebar draws are asked about", () => {
-  const many = Model.accountView(snapshot([{ alias: "work", ok: true, channels: [],
-    dms: [dm({ id: "D1", withUserId: "U1" }), dm({ id: "D2", withUserId: "U2" }),
-          dm({ id: "D3", withUserId: "" }), dm({ id: "D4", withUserId: "U1" })] }]), "work")
-  // Deduplicated, group DMs skipped, and capped - it is one request each.
-  eq(Model.presenceWanted(many, 20), ["U1", "U2"])
-  eq(Model.presenceWanted(many, 1), ["U1"])
-  eq(Model.presenceWanted(null, 20), [])
-})
-
 test("and only the ones the fold left on screen", () => {
-  // presenceWanted walks the snapshot, which carries up to thirty direct
-  // messages; the sidebar folds the quiet ones away behind one row. Asking
+  // The snapshot carries up to thirty direct messages; the sidebar folds the quiet ones away behind one row. Asking
   // about somebody whose dot is not drawn is a request spent on nothing.
   const rows = folding([dm({ withUserId: "U1" }),
                         quietDm("D8", "Yuki Tanaka"),
@@ -521,7 +510,26 @@ test("presence is drawn in the theme's colours or not at all", () => {
   eq(Model.presenceColor("away", { muted: "#6c7086" }), "#6c7086")
   eq(Model.presenceColor("active", {}), "", "no palette, no dot")
   eq(Model.presenceColor("", { green: "#a6e3a1" }), "")
-  eq(Model.presenceLabel("active"), "Active")
+})
+
+test("an address in quotes or brackets links to the address alone", () => {
+  // Matched on the escaped text, the entity a quote had become was taken into
+  // the link: href="https://example.com&quot" and a stray ";" after it.
+  const html = Model.linkify('He said "https://example.com". See <https://a.b/c?x=1&y=2>', "", [])
+  ok(html.indexOf('href="https://example.com"') !== -1, html)
+  ok(html.indexOf('href="https://a.b/c?x=1&amp;y=2"') !== -1, html)
+  ok(html.indexOf("&quot;.") !== -1, "the quote and the full stop stay prose: " + html)
+  ok(html.indexOf("&quot</a>") === -1 && html.indexOf("&gt</a>") === -1, html)
+})
+
+test("a file URL becomes a path, and a name that cannot be decoded becomes nothing", () => {
+  eq(Model.localPath("file:///home/me/My%20Report.pdf"), "/home/me/My Report.pdf")
+  // A bare path is not URL-encoded, so a literal % in it stays a %.
+  eq(Model.localPath("/home/me/100%25 done.txt"), "/home/me/100%25 done.txt")
+  // Not UTF-8: decodeURIComponent throws, and that must not escape.
+  eq(Model.localPath("file:///home/me/caf%E9.png"), "")
+  eq(Model.localPath("https://example.com/a.png"), "")
+  eq(Model.localPath(null), "")
 })
 
 test("a reaction chip knows which way it toggles", () => {

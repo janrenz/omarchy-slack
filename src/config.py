@@ -17,6 +17,7 @@ import json
 import os
 import stat
 import sys
+import tempfile
 
 DEFAULT_SHELL_JSON = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
@@ -116,17 +117,35 @@ def save_settings(args):
         else:
             entry[key] = value
 
-    directory = os.path.dirname(os.path.abspath(args.shell_json))
-    tmp = args.shell_json + ".tmp"
+    # Through the link, not over it. A dotfiles setup keeps shell.json in a
+    # repository and links it into place; renaming a temp file onto the link
+    # replaced it with a regular file, and the next settings change silently
+    # stopped reaching the repository. The temp file is made beside the real
+    # file, so the rename stays on one filesystem and atomic.
+    target = os.path.realpath(args.shell_json)
+    directory = os.path.dirname(target)
+    tmp = ""
     try:
-        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                         stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        # The mode the file already has, not one this decides: somebody who
+        # made their config private meant it, and somebody who did not is not
+        # asking for it to change either.
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        handle, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(target) + ".",
+                                       suffix=".tmp")
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
             json.dump(config, stream, indent=2, ensure_ascii=False)
             stream.write("\n")
-        os.replace(tmp, args.shell_json)
+        os.replace(tmp, target)
+        tmp = ""
     except OSError as error:
         fail("write_failed", "Could not write %s: %s" % (args.shell_json, error))
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     out({"ok": True, "settings": {k: v for k, v in entry.items() if k != "id"}})
 
 

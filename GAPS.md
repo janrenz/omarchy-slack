@@ -144,7 +144,9 @@ none. That is a fine answer; it is just not on the page.
 
 ---
 
-## SLACK-5 — A `.bak` file sits inside `src/` and `.gitignore` does not cover it · `low` · Gap
+## SLACK-5 — A `.bak` file sits inside `src/` and `.gitignore` does not cover it · `low` · Gap · **closed**
+
+Closed: `.gitignore` covers `*.bak` and `*.bak.*`, and `src/` holds none.
 
 ```
 $ git status --porcelain
@@ -239,6 +241,6 @@ something the lock does not give it.
 | SLACK-2 | medium | Divergence | Lists are `Repeater`s; mail's diffing model was never ported |
 | SLACK-3 | medium | Unspecified | `demo` makes every write a no-op and is in no manifest |
 | SLACK-4 | low | Unspecified | Thread marks are per-machine and lost by `remove`; unsaid |
-| SLACK-5 | low | Gap | A 2921-line `.bak` inside `src/`, uncovered by `.gitignore` |
+| SLACK-5 | low | Gap | ~~A 2921-line `.bak` inside `src/`, uncovered by `.gitignore`~~ closed |
 | PLAT-1 | medium | Divergence | Shared components are copies with silent drift; no canonical source |
 | PLAT-2 | medium | Unspecified | Three answers to the several-Services problem, no platform decision |

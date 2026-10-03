@@ -9,15 +9,20 @@ changing it.
 
 ```
 manifest.json          schemaVersion 1. kinds, entryPoints, and the settings
-                       schema the shell's settings panel renders. Adding a
-                       setting means adding it here AND reading it through
-                       `setting()`.
+                       schema. The shell only registers that schema - nothing
+                       of its own renders it; the window's form (`,`) does.
+                       Adding a setting means adding it here AND reading it
+                       through `setting()`.
 src/slack.py           The helper. Holds the token, makes every network call,
                        prints one JSON object per invocation. Stdlib only.
                        Caches beside the token: marks.json (channel read
                        marks), threads.json (thread read marks, local only).
 src/emoji.py           :shortcode: -> character, for the helper's flattening.
-src/config.py          Shared paths and the token store the helper reads.
+src/config.py          Reads and writes this widget's entry in shell.json, the
+                       one place settings live. slack.py owns the token store
+                       and the cache itself.
+src/authcb             What the slack-omarchy:// scheme launches: hands a
+                       browser sign-in back to the waiting helper.
 src/Model.js           Pure JS: shaping, grouping, labels, link building. No Qt
                        types, so `node dev/test-model.js` can run it.
 src/Service.qml        Owns the Processes that run slack.py, the poll timer,
@@ -30,7 +35,7 @@ src/BarPanel.qml       The dropdown: what is waiting, and nothing else. Binds to
                        fetches nothing. Every row is a way into the window.
 src/SlackWindow.qml    The window. Sidebar, transcript, message box, and the
                        canvas pane - which has no message box, and has the
-                       Markdown editor instead. ~2k lines.
+                       Markdown editor instead. ~3.2k lines.
                        Also the file chooser and the window-wide DropArea, which
                        both end at sendFile() - the one place a file:// URL
                        becomes a path.
@@ -43,12 +48,13 @@ src/handover.sh        Builds the prompt that hands a conversation to the
                        hand; --print shows the prompt and launches nothing.
 skills/omarchy-slack/  What that agent is pointed at: the helper's commands, and
                        how to hand a draft back instead of posting it.
-src/SettingsForm.qml   The settings UI shown inside the shell's settings panel.
+src/SettingsForm.qml   The settings form, mounted inside the window (`,`).
 src/QuickSwitcher.qml  `n` / `Ctrl-k`. src/SearchPane.qml is Slack search.
                        The `directory` command it runs is also what the message
                        box's @-completion uses, with its own query and its own
                        Process - see Service's mention section.
 src/ImageViewer.qml    A picture from the transcript, with save-as.
+src/KeyHelp.qml        `?`: the key table. Keep it in step with the README's.
 ```
 
 Data flows one way: `slack.py` → JSON → `Service.qml` → `Model.js` → the window.
@@ -57,9 +63,10 @@ Nothing goes back the other way except a command line and a stdin payload.
 ## Invariants. Breaking one of these is a security bug, not a regression
 
 1. **The token never reaches QML.** It lives in `~/.local/state/omarchy/slack/`,
-   mode 600, and is passed to `slack.py` on **stdin** — never in argv (anyone on
-   the machine can read another process's command line) and never in
-   `shell.json` (world-readable).
+   mode 600, and the helper reads it from there itself. The one way in is
+   `login-set`, which takes it on **stdin** — never in argv (anyone on the
+   machine can read another process's command line) and never in `shell.json`
+   (world-readable).
 2. **The window never fetches anything remote.** Avatars, images and files are
    fetched by the helper, checked against Slack's own hosts first, and the token
    is attached for `files.slack.com` alone. An `<img src="https://evil/">` in a

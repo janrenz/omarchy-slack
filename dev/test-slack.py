@@ -15,8 +15,10 @@ import ast
 import base64
 import hashlib
 import inspect
+import http.client
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -1158,6 +1160,10 @@ class Uploads(unittest.TestCase):
     def test_a_comment_is_escaped_the_way_a_message_is(self):
         _, sent = self.run_upload(self.upload_args(comment="a < b & c"), self.ANSWERS)
         self.assertEqual(sent["calls"][1][1]["initial_comment"], "a &lt; b &amp; c")
+
+    def test_a_mention_in_a_comment_arrives_as_a_mention(self):
+        _, sent = self.run_upload(self.upload_args(comment="for <@U024BE7LH> <x>"), self.ANSWERS)
+        self.assertEqual(sent["calls"][1][1]["initial_comment"], "for <@U024BE7LH> &lt;x&gt;")
 
     def test_a_file_that_reached_slack_but_no_conversation_says_exactly_that(self):
         answers = dict(self.ANSWERS)
@@ -2505,10 +2511,33 @@ class RotatingTokens(unittest.TestCase):
             raise slack.AccountError("exchange_failed", "no")
         slack.oauth_call = refuse
         try:
-            with self.assertRaises(slack.AccountError):
+            with self.assertRaises(slack.AccountError) as raised:
                 slack.refreshed("work", account)
         finally:
             slack.oauth_call = original
+        # auth_required specifically: it is the one code the window answers
+        # by offering a sign-in. Under its own code the refusal was an error
+        # with no way out of it.
+        self.assertEqual(raised.exception.code, "auth_required")
+
+    def test_not_reaching_slack_is_not_a_reason_to_sign_in_again(self):
+        account = self.account()
+        original = slack.oauth_call
+
+        def offline(params):
+            raise slack.AccountError("unreachable", "no network")
+        slack.oauth_call = offline
+        try:
+            with self.assertRaises(slack.AccountError) as raised:
+                slack.refreshed("work", account)
+        finally:
+            slack.oauth_call = original
+        self.assertEqual(raised.exception.code, "unreachable")
+
+    def test_a_waiter_outlasts_the_renewal_it_is_waiting_for(self):
+        """Giving up on a renewal still in flight spends its refresh token twice."""
+        timeout = int(re.search(r"timeout=(\d+)", inspect.getsource(slack.oauth_call)).group(1))
+        self.assertGreater(slack.RenewalSlot.WAIT, timeout)
 
     def test_the_oauth_refusals_are_answered_in_words_not_in_spec_terms(self):
         """What Slack says here is the OAuth spec's vocabulary, not a person's."""
@@ -2780,6 +2809,464 @@ class SchemeRedirect(unittest.TestCase):
         source = inspect.getsource(slack.cmd_login_wait)
         self.assertIn('pending.get("redirect")', source)
         self.assertIn('"redirect_uri": redirect', source)
+
+
+class Scratch(unittest.TestCase):
+    """A state and cache directory of its own, put back afterwards.
+
+    Several older tests point CACHE_DIR somewhere and leave it there, so every
+    one of these restores all three paths rather than trusting the last test.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.saved = (slack.STATE_DIR, slack.CACHE_DIR, slack.MEDIA_DIR)
+        slack.STATE_DIR = os.path.join(self.dir, "state")
+        slack.CACHE_DIR = os.path.join(self.dir, "cache")
+        slack.MEDIA_DIR = os.path.join(slack.CACHE_DIR, "media")
+        slack.write_json(slack.state_path("work"), {
+            "alias": "work", "token": "xoxp-test", "userId": "U1",
+            "scopes": ",".join(slack.WANTED_SCOPES)}, private=True)
+
+    def tearDown(self):
+        slack.STATE_DIR, slack.CACHE_DIR, slack.MEDIA_DIR = self.saved
+
+    @staticmethod
+    def scripted(answers, asked=None):
+        """A Slack class whose every call is answered from `answers`."""
+        class Scripted(slack.Slack):
+            def call(self, method, params=None, timeout=20, retries=1):
+                if asked is not None:
+                    asked.append(method)
+                answer = answers.get(method, (False, {"error": "not_scripted"}))
+                return answer(params) if callable(answer) else answer
+        return Scripted
+
+    def with_slack(self, cls, function, *args):
+        original = slack.Slack
+        slack.Slack = cls
+        try:
+            return function(*args)
+        finally:
+            slack.Slack = original
+
+
+class BrokenConnections(unittest.TestCase):
+    """An answer that breaks off halfway is not an OSError, and was a traceback."""
+
+    def setUp(self):
+        self.saved = (slack.API_OPENER, slack.IMAGE_OPENER, slack.CANVAS_OPENER,
+                      slack.UPLOAD_OPENER)
+
+        def broken(request, timeout=None):
+            raise http.client.IncompleteRead(b"half")
+        for name in ("API_OPENER", "IMAGE_OPENER", "CANVAS_OPENER", "UPLOAD_OPENER"):
+            setattr(slack, name, FakeOpener(broken))
+
+    def tearDown(self):
+        (slack.API_OPENER, slack.IMAGE_OPENER, slack.CANVAS_OPENER,
+         slack.UPLOAD_OPENER) = self.saved
+
+    def test_an_api_call_that_breaks_off_is_unreachable(self):
+        ok, payload = slack.Slack("xoxp-test").call("auth.test", retries=0)
+        self.assertFalse(ok)
+        self.assertEqual(payload["error"], "unreachable")
+
+    def test_a_picture_that_breaks_off_is_a_failed_picture(self):
+        with self.assertRaises(slack.AccountError) as raised:
+            slack.fetch_media("https://avatars.slack-edge.com/%d.png" % time.time_ns(), "")
+        self.assertEqual(raised.exception.code, "image_failed")
+
+    def test_a_canvas_that_breaks_off_is_a_failed_canvas(self):
+        with self.assertRaises(slack.AccountError) as raised:
+            slack.fetch_canvas("https://files.slack.com/files-pri/T1-F1/canvas", "xoxp-test")
+        self.assertEqual(raised.exception.code, "canvas_failed")
+
+    def test_an_upload_that_breaks_off_is_reported_not_raised(self):
+        sent, problem = slack.post_upload("https://files.slack.com/upload/v1/x", "a.txt", b"x")
+        self.assertFalse(sent)
+        self.assertIn("could not be sent", problem)
+
+    def test_a_sign_in_exchange_that_breaks_off_is_unreachable(self):
+        with self.assertRaises(slack.AccountError) as raised:
+            slack.oauth_call({"code": "x"})
+        self.assertEqual(raised.exception.code, "unreachable")
+
+
+class LastResort(unittest.TestCase):
+    """Invariant 5 for the failures nobody wrote a handler for."""
+
+    def test_an_unforeseen_exception_is_still_one_json_object(self):
+        def explode(_args):
+            raise RuntimeError("boom")
+        original_command, original_argv = slack.cmd_reactions, sys.argv
+        slack.cmd_reactions, sys.argv = explode, ["slack.py", "reactions"]
+        try:
+            payload = capture(slack.main)
+        finally:
+            slack.cmd_reactions, sys.argv = original_command, original_argv
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "internal")
+        self.assertIn("boom", payload["error"]["message"])
+
+    def test_unusable_arguments_still_exit_non_zero(self):
+        helper = os.path.join(os.path.dirname(os.path.abspath(slack.__file__)), "slack.py")
+        done = subprocess.run([sys.executable, helper, "fetch"], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 2)
+
+
+class AtomicWrites(Scratch):
+    """Several helpers write the same cache files at the same moment."""
+
+    def test_concurrent_writers_do_not_take_each_others_temp_file(self):
+        path = slack.cache_path("work", "marks.json")
+        errors = []
+
+        def hammer(n):
+            try:
+                for i in range(150):
+                    slack.write_json(path, {"writer": n, "i": i})
+            except Exception as error:  # noqa: BLE001 - what the test is looking for
+                errors.append(error)
+
+        threads = [threading.Thread(target=hammer, args=(n,)) for n in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertIn("writer", slack.read_json(path))
+        self.assertEqual([n for n in os.listdir(os.path.dirname(path)) if n.endswith(".tmp")], [])
+
+    def test_the_cache_is_ours_alone_all_the_way_down(self):
+        path = slack.cache_path("work", os.path.join("transcripts", "D1.json"))
+        slack.write_json(path, {"a direct message": True})
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        for directory in (slack.CACHE_DIR, os.path.dirname(os.path.dirname(path)),
+                          os.path.dirname(path)):
+            self.assertEqual(stat.S_IMODE(os.stat(directory).st_mode), 0o700, directory)
+
+    def test_a_cache_made_by_an_older_copy_is_tightened(self):
+        slack._TIGHTENED.discard(slack.CACHE_DIR)
+        os.makedirs(slack.CACHE_DIR, mode=0o755, exist_ok=True)
+        os.chmod(slack.CACHE_DIR, 0o755)
+        slack.write_json(slack.cache_path("work", "marks.json"), {})
+        self.assertEqual(stat.S_IMODE(os.stat(slack.CACHE_DIR).st_mode), 0o700)
+
+    def test_a_failed_write_leaves_no_temp_file_behind(self):
+        target = slack.cache_path("work", "in-the-way")
+        os.makedirs(target)
+        with self.assertRaises(OSError):
+            slack.write_json(target, {"x": 1})
+        self.assertEqual([n for n in os.listdir(os.path.dirname(target)) if n.endswith(".tmp")],
+                         [])
+
+    def test_a_downloaded_picture_is_private_too(self):
+        class Png:
+            headers = {"Content-Type": "image/png"}
+
+            def read(self, _n):
+                return b"\x89PNG"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        original = slack.IMAGE_OPENER
+        slack.IMAGE_OPENER = FakeOpener(lambda request, timeout=None: Png())
+        try:
+            path, _ = slack.fetch_media("https://avatars.slack-edge.com/me.png", "")
+        finally:
+            slack.IMAGE_OPENER = original
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(slack.MEDIA_DIR).st_mode), 0o700)
+
+    def test_an_unchanged_cache_is_not_rewritten(self):
+        slack.save_marks("work", {"C1": "1.0"}, {"C1": "2.0"})
+        path = slack.cache_path("work", "marks.json")
+        before = os.stat(path).st_ino
+        slack.save_marks("work", {"C1": "1.0"}, {"C1": "2.0"})
+        self.assertEqual(os.stat(path).st_ino, before, "a rename would have made a new inode")
+        slack.save_marks("work", {"C1": "3.0"}, {"C1": "2.0"})
+        self.assertEqual(slack.load_marks("work")[0], {"C1": "3.0"})
+
+
+class DirectoryCache(Scratch):
+    """users.json and channels.json are shared between the poll and the switcher."""
+
+    def test_looking_up_one_person_does_not_forget_when_everybody_was_listed(self):
+        slack.save_users("work", {}, 12345.0)
+        api = FakeApi({"users.info": (True, {"user": {"id": "U9", "name": "nine"}})})
+        slack.resolve_users(api, "work", ["U9"])
+        users, listed_at = slack.load_users("work")
+        self.assertIn("U9", users)
+        self.assertEqual(listed_at, 12345.0)
+
+    def test_a_poll_that_learns_no_new_channel_name_writes_nothing(self):
+        path = slack.cache_path("work", "channels.json")
+        slack.write_json(path, {"names": {"C1": "general"}, "all": [{"id": "C1"}],
+                                "listedAt": 99.0})
+        before = os.stat(path).st_ino
+        slack.channel_names("work", [{"id": "C1", "name": "general"}])
+        self.assertEqual(os.stat(path).st_ino, before)
+
+    def test_a_new_channel_name_keeps_the_switchers_list(self):
+        path = slack.cache_path("work", "channels.json")
+        slack.write_json(path, {"names": {"C1": "general"}, "all": [{"id": "C1"}],
+                                "listedAt": 99.0})
+        known = slack.channel_names("work", [{"id": "C2", "name": "random"}])
+        self.assertEqual(known["C2"], "random")
+        on_disk = slack.read_json(path)
+        self.assertEqual(on_disk["all"], [{"id": "C1"}])
+        self.assertEqual(on_disk["listedAt"], 99.0)
+
+    def test_noticing_new_scopes_does_not_roll_back_a_renewed_token(self):
+        loaded = slack.read_json(slack.state_path("work"))
+        # Another process renews while this one is mid-poll.
+        renewed = dict(loaded, token="xoxe.renewed", refreshToken="xoxe-1-new")
+        slack.write_json(slack.state_path("work"), renewed, private=True)
+        api = slack.Slack(loaded["token"])
+        api.scopes = loaded["scopes"] + ",extra:scope"
+        slack.remember_scopes("work", loaded, api)
+        on_disk = slack.read_json(slack.state_path("work"))
+        self.assertEqual(on_disk["token"], "xoxe.renewed")
+        self.assertEqual(on_disk["refreshToken"], "xoxe-1-new")
+        self.assertTrue(on_disk["scopes"].endswith("extra:scope"))
+
+    def test_a_scope_string_is_read_the_same_way_everywhere(self):
+        self.assertEqual(slack.scope_set(" a, b,,c "), {"a", "b", "c"})
+        self.assertEqual(slack.scope_set(None), set())
+
+
+class PartialLists(Scratch):
+    """One half of the conversation list refused."""
+
+    @staticmethod
+    def lists(channels=(True, {"channels": [{"id": "C2", "name": "new"}]}),
+              dms=(True, {"channels": [{"id": "D2", "is_im": True}]})):
+        def by_type(params):
+            return channels if "public_channel" in (params or {}).get("types", "") else dms
+        return {"users.conversations": by_type}
+
+    def test_a_refused_half_is_not_cached_and_comes_from_the_last_good_list(self):
+        slack.write_json(slack.cache_path("work", "list.json"), {
+            "rows": [{"id": "C1", "name": "old"}, {"id": "D1", "is_im": True}],
+            "at": time.time() - 3600})
+        api = FakeApi(self.lists(dms=(False, {"error": "ratelimited"})))
+        rows, problem = slack.conversation_lists(api, "work")
+        self.assertEqual([row["id"] for row in rows], ["C2", "D1"])
+        self.assertEqual(problem, "ratelimited")
+        kept = slack.read_json(slack.cache_path("work", "list.json"))
+        self.assertEqual([row["id"] for row in kept["rows"]], ["C1", "D1"],
+                         "the partial list was not written over the complete one")
+
+    def test_with_nothing_to_fall_back_on_the_half_that_worked_is_used_and_not_kept(self):
+        api = FakeApi(self.lists(channels=(False, {"error": "ratelimited"})))
+        rows, problem = slack.conversation_lists(api, "work")
+        self.assertEqual([row["id"] for row in rows], ["D2"])
+        self.assertFalse(os.path.exists(slack.cache_path("work", "list.json")))
+
+
+class FetchAccount(Scratch):
+    """A whole poll, with Slack answering to order."""
+
+    def args(self, **overrides):
+        args = Args()
+        args.account, args.demo, args.max_age = ["work"], False, 0
+        args.conversations, args.sort = 40, "recent"
+        args.avatars = args.presence = args.fresh = False
+        args.cached_only = False
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def answers(self, info=(False, {"error": "ratelimited"})):
+        return {
+            "users.conversations": lambda params: (True, {"channels": (
+                [{"id": "C1", "name": "general"}]
+                if "public_channel" in params.get("types", "")
+                else [{"id": "D1", "is_im": True, "user": "U2"}])}),
+            "search.messages": (True, {"messages": {"matches": [
+                {"channel": {"id": "C1"}, "ts": "200.0", "user": "U2", "text": "hi"}],
+                "paging": {"pages": 1}}}),
+            "users.info": lambda params: (True, {"user": {"id": params["user"],
+                                                          "name": params["user"]}}),
+            "stars.list": (True, {"items": []}),
+            "conversations.info": info,
+        }
+
+    def poll(self, answers):
+        return self.with_slack(self.scripted(answers), slack.fetch_account, "work", self.args())
+
+    def channel(self, result):
+        return [row for row in result["channels"] if row["id"] == "C1"][0]
+
+    def test_an_unanswered_row_keeps_the_unread_mark_the_last_poll_left(self):
+        slack.save_marks("work", {"C1": "100.0"}, {})
+        row = self.channel(self.poll(self.answers()))
+        self.assertTrue(row["unread"], "200.0 is past the mark the last answer left")
+        self.assertEqual(row["unreadCount"], 1)
+
+    def test_a_row_nobody_has_ever_answered_for_is_not_guessed_unread(self):
+        row = self.channel(self.poll(self.answers()))
+        self.assertFalse(row["unread"])
+
+    def test_an_answer_still_overrides_the_mark(self):
+        slack.save_marks("work", {"C1": "100.0"}, {})
+        row = self.channel(self.poll(self.answers(
+            info=(True, {"channel": {"id": "C1", "last_read": "200.0"}}))))
+        self.assertFalse(row["unread"])
+
+    def test_everybody_is_named_in_one_batch(self):
+        batches = []
+        original = slack.resolve_users
+
+        def counting(api, alias, ids, users=None):
+            batches.append(list(ids))
+            return original(api, alias, ids, users)
+        slack.resolve_users = counting
+        try:
+            self.poll(self.answers())
+        finally:
+            slack.resolve_users = original
+        self.assertEqual(len(batches), 1)
+        self.assertIn("U2", batches[0])
+
+    def test_a_snapshot_written_without_faces_is_handed_over_with_them(self):
+        """The bar polls with --no-avatars, and the window inherits its poll."""
+        url = "https://avatars.slack-edge.com/u2.png"
+        slack.save_users("work", {"U2": {"id": "U2", "name": "Two", "avatar": url}}, 1.0)
+        picture = slack.media_path_for(url) + ".png"
+        os.makedirs(os.path.dirname(picture), exist_ok=True)
+        with open(picture, "wb") as handle:
+            handle.write(b"\x89PNG")
+        slack.write_json(slack.cache_path("work", "snapshot.json"), {"at": time.time(), "snapshot": {
+            "ok": True, "accounts": [{"ok": True, "alias": "work", "channels": [], "dms": [
+                {"id": "D1", "withUserId": "U2", "avatar": ""}]}]}})
+
+        explode = self.scripted({})
+        window = self.with_slack(explode, capture, slack.cmd_fetch,
+                                 self.args(max_age=120, avatars=True))
+        self.assertEqual(window["accounts"][0]["dms"][0]["avatar"], picture)
+        bar = self.with_slack(explode, capture, slack.cmd_fetch,
+                              self.args(max_age=120, avatars=False))
+        self.assertEqual(bar["accounts"][0]["dms"][0]["avatar"], "")
+
+
+class TypedMarkup(unittest.TestCase):
+    """What somebody typed into a rich_text message stays what they typed."""
+
+    def flatten(self, *elements):
+        message = {"text": "", "blocks": [{"type": "rich_text", "elements": [
+            {"type": "rich_text_section", "elements": list(elements)}]}]}
+        return slack.text_and_links(slack.message_source(message), {}, {})
+
+    def test_typed_link_syntax_is_not_a_link(self):
+        text, links = self.flatten({"type": "text", "text": "<https://evil|https://bank>"})
+        self.assertEqual(text, "<https://evil|https://bank>")
+        self.assertEqual(links, [])
+
+    def test_a_link_label_cannot_smuggle_a_second_link(self):
+        text, links = self.flatten({"type": "link", "url": "https://real.example/",
+                                    "text": "x <https://evil|bank> & y"})
+        self.assertEqual(text, "x <https://evil|bank> & y")
+        self.assertEqual([link["href"] for link in links], ["https://real.example/"])
+
+    def test_typed_ampersands_and_brackets_come_back_as_typed(self):
+        text, _ = self.flatten({"type": "text", "text": "a < b && c > d &lt;"})
+        self.assertEqual(text, "a < b && c > d &lt;")
+
+
+class Aliases(unittest.TestCase):
+    def test_a_trailing_newline_is_not_part_of_a_name(self):
+        self.assertTrue(slack.alias_problem("work\n"))
+        with self.assertRaises(slack.AccountError):
+            slack.state_path("work\n")
+
+
+class PausedTranscripts(Scratch):
+    """A witness that stands still only means something while somebody looks."""
+
+    def record(self, age):
+        slack.save_marks("work", {}, {"C1": "100.0"})
+        slack.save_transcript("work", "C1", "", {"messages": []}, 40, False)
+        path = slack.transcript_cache_path("work", "C1", "")
+        record = slack.read_json(path)
+        record["at"] = time.time() - age
+        slack.write_json(path, record)
+        return record
+
+    def current(self, record):
+        return slack.transcript_is_current("work", "C1", "", record, 40, False)
+
+    def test_a_fresh_record_with_an_unmoved_witness_is_believed(self):
+        self.assertTrue(self.current(self.record(30)))
+
+    def test_an_old_record_is_not_believed_when_nobody_has_polled_since(self):
+        self.assertFalse(self.current(self.record(slack.SNAPSHOT_MAX_AGE + 60)))
+
+    def test_an_old_record_is_believed_when_a_poll_since_saw_nothing_new(self):
+        record = self.record(slack.SNAPSHOT_MAX_AGE + 60)
+        slack.write_json(slack.cache_path("work", "snapshot.json"), {"at": time.time()})
+        self.assertTrue(self.current(record))
+
+
+class Handover(unittest.TestCase):
+    """handover.sh puts the alias and the id into a command line for an agent."""
+
+    script = os.path.join(os.path.dirname(os.path.abspath(slack.__file__)), "handover.sh")
+
+    def run_it(self, *argv):
+        return subprocess.run(["bash", self.script, *argv], capture_output=True, text=True)
+
+    def test_a_plain_alias_and_id_build_a_prompt(self):
+        done = self.run_it("--account", "work", "--channel", "C0123", "--print")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("--account work --channel C0123", done.stdout)
+
+    def test_an_alias_that_is_not_a_name_builds_nothing(self):
+        for bad in ("work; rm -rf ~", "$(id)", "a b"):
+            done = self.run_it("--account", bad, "--channel", "C1", "--print")
+            self.assertNotEqual(done.returncode, 0, bad)
+            self.assertEqual(done.stdout, "", bad)
+
+    def test_a_channel_that_is_not_an_id_builds_nothing(self):
+        done = self.run_it("--account", "work", "--channel", "C1`id`", "--print")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "")
+
+    def test_an_option_missing_its_value_says_so(self):
+        done = self.run_it("--account", "work", "--channel", "C1", "--print", "--title")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("--title needs a value", done.stderr)
+
+
+class ShellJson(unittest.TestCase):
+    """config.py writes the user's shell.json, which may be a link into dotfiles."""
+
+    config = os.path.join(os.path.dirname(os.path.abspath(slack.__file__)), "config.py")
+
+    def test_a_linked_shell_json_is_written_through_and_keeps_its_mode(self):
+        with tempfile.TemporaryDirectory() as home:
+            real = os.path.join(home, "dotfiles-shell.json")
+            with open(real, "w") as handle:
+                json.dump({"bar": {"layout": {"right": [{"id": "janrenz.omarchy.slack"}]}}},
+                          handle)
+            os.chmod(real, 0o600)
+            link = os.path.join(home, "shell.json")
+            os.symlink(real, link)
+            done = subprocess.run([sys.executable, self.config, "--shell-json", link,
+                                   "--set", '{"paused": true}'],
+                                  capture_output=True, text=True)
+            self.assertTrue(json.loads(done.stdout)["ok"], done.stdout + done.stderr)
+            self.assertTrue(os.path.islink(link), "the link is still a link")
+            with open(real) as handle:
+                self.assertTrue(json.load(handle)["bar"]["layout"]["right"][0]["paused"])
+            self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o600)
+            self.assertEqual(sorted(os.listdir(home)), ["dotfiles-shell.json", "shell.json"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -53,7 +53,7 @@ Column {
 
   function save() {
     if (!service || !dirty) { root.closeRequested(); return }
-    service.saveSettings(pending)
+    if (service.saveSettings(pending)) awaitingSave = true
   }
 
   // A sign-in pressed before the name was saved, waiting for it. "" | "browser"
@@ -66,6 +66,10 @@ Column {
   // and pressing Sign in went to a service that still knew no workspace. The
   // press now writes the name first and signs in when it comes back.
   property string signInAfter: ""
+  // Whether the save the service is answering is this form's. `p` saves too,
+  // through the same service, and its answer used to clear whatever had been
+  // typed here and not saved yet, and close the form.
+  property bool awaitingSave: false
 
   function signInNow(what) {
     if (!service) return
@@ -75,7 +79,7 @@ Column {
       return
     }
     signInAfter = what
-    service.saveSettings(pending)
+    if (service.saveSettings(pending)) awaitingSave = true
   }
 
   Connections {
@@ -83,11 +87,17 @@ Column {
     // Cleared only once the write has actually landed, so a failed save keeps
     // what was typed rather than throwing it away and saying so.
     function onSettingsSaved() {
+      if (!root.awaitingSave) return
+      root.awaitingSave = false
       root.pending = ({})
       // A queued sign-in stays here rather than closing: the name still has to
       // be read back off the file before the service can see it, and this is
       // where the sign-in reports.
       if (root.signInAfter === "") root.closeRequested()
+    }
+
+    function onSavingChanged() {
+      if (!root.service.saving && root.service.saveError !== "") root.awaitingSave = false
     }
 
     // The name has come back from the file. `configured` is derived from it, so

@@ -42,6 +42,18 @@ Item {
 
   onRowsChanged: cursorIndex = 0
 
+  // Keeps the cursored result on screen. The switcher shows at most twelve
+  // rows and never needs this; a search can return a page of them, and Down
+  // walked off the bottom of it with nothing following.
+  function keepVisible(itemY, itemHeight) {
+    var flick = results.contentItem
+    if (!flick || itemHeight <= 0) return
+    if (itemY < flick.contentY) flick.contentY = Math.max(0, itemY)
+    else if (itemY + itemHeight > flick.contentY + flick.height)
+      flick.contentY = Math.max(0, Math.min(Math.max(0, flick.contentHeight - flick.height),
+                                            itemY + itemHeight - flick.height))
+  }
+
   Rectangle {
     anchors.fill: parent
     color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
@@ -131,6 +143,7 @@ Item {
         }
 
         ScrollView {
+          id: results
           width: parent.width
           height: card.height - y
           clip: true
@@ -146,6 +159,7 @@ Item {
                 required property var modelData
                 required property int index
                 readonly property bool cursored: index === root.cursorIndex
+                onCursoredChanged: if (cursored) root.keepVisible(y, height)
 
                 width: card.width
                 implicitHeight: hit.implicitHeight + Style.spacing.md * 2

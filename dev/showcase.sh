@@ -10,7 +10,7 @@
 # desktop. This runs the window offscreen in a Quickshell of its own instead:
 # your bar, your shell.json and your session are not involved, and neither is
 # any account - `demo` makes slack.py answer every read from its own fixtures
-# and refuse every write.
+# and every write as if it had happened, posting nothing.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -64,7 +64,7 @@ shot "$OUT/showcase-keyboard.png"
 ipc pane none
 
 # preview.png is the one name the marketplace looks for in the repository
-# root; it is a copy rather than a fifth photograph so the listing card cannot
+# root; it is a copy rather than a sixth photograph so the listing card cannot
 # drift from the screenshots in the README.
 cp "$OUT/showcase-conversation.png" "$OUT/preview.png"
 

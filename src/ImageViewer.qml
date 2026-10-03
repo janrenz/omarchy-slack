@@ -79,8 +79,11 @@ Item {
   }
 
   function copyTo(fileUrl) {
-    var target = decodeURIComponent(String(fileUrl).replace(/^file:\/\//, ""))
-    if (target === "") return
+    var target = Model.localPath(fileUrl)
+    if (target === "") {
+      root.problem = "That name could not be used"
+      return
+    }
     copyProc.target = target
     // cp rather than reading the bytes through QML: the picture can be several
     // megabytes and the shell process has no reason to hold a copy of it.
@@ -142,6 +145,12 @@ Item {
         fillMode: Image.PreserveAspectFit
         mipmap: true
         asynchronous: true
+        // Decoded no larger than the screen it can be shown on, and not kept
+        // in the shell's image cache once the viewer has closed: a phone
+        // photograph is tens of megabytes decoded, and the shell lives all day.
+        cache: false
+        sourceSize: Qt.size(Screen.width * Screen.devicePixelRatio,
+                            Screen.height * Screen.devicePixelRatio)
         // Clicks on the picture itself are not clicks away from it.
         MouseArea { anchors.fill: parent }
       }

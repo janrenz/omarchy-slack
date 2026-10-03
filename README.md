@@ -503,9 +503,9 @@ is the line that writes it into the registry — so the plugin brings its own.
 | `avatars` | `true` | Faces, fetched by the helper and cached on disk. |
 | `presence` | `true` | A dot on each DM saying whether they are around. One request per person in view. |
 | `refreshIntervalSec` | `120` | How often to poll (30–3600). |
-| `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
+| `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery, triples it in power-saver. |
 | `paused` | `false` | Stop everything that goes to Slack on its own until you switch it off again. `p` in the dropdown or the window flips it, and it is remembered across a restart. |
-| `icon` / `label` | `󰓭` | Bar glyph, or text instead of it. |
+| `icon` / `label` | `󰒱` | Bar glyph, or text instead of it. |
 | `ipcTarget` | — | A name of your own for the dropdown, so a key can summon it: set `slack` and bind `omarchy-shell slack toggle`. Empty means the dropdown opens by clicking the icon. The window is separate and always answers to `omarchy-shell shell toggle janrenz.omarchy.slack`. |
 | `tintOnUnread` | `true` | Highlight the bar icon while something is unread. |
 | `showCount` | `false` | The number of waiting conversations, beside the icon. |
@@ -920,7 +920,10 @@ happened and posts nothing.
 `dev/run.sh` starts a Quickshell of its own with `QT_QPA_PLATFORM=offscreen`
 and loads `SlackWindow.qml` itself — the same window the shell hosts, the same
 service under it — then draws its own screenshots through `grabToImage`. Your
-bar, your `shell.json` and your session are not involved, which is the
+bar and your session are not involved, and neither is your `shell.json` unless
+you save from the window's settings form or press `p` in it, which write
+through `config.py` like the real thing. `ipc call dev account <name>` turns
+`demo` off on a real token, after which a send is a real send. Short of that, which is the
 difference from the Teams plugin's showcase script: that one installs a demo
 widget into your live shell and puts your configuration back afterwards.
 
@@ -935,10 +938,81 @@ Two settings exist for the harness's benefit, both ignored unless `demo` is on:
 
 | Key | Does |
 |---|---|
-| `demo` | Answer every read from the fixtures, and refuse every write. |
+| `demo` | Answer every read from the fixtures; every write returns as if it had happened and posts nothing. |
 | `demoOpen` | The id of a conversation to open by itself once the list loads, e.g. `demo-channel-0`. |
 
 ## Changelog
+
+### 0.13.0 — 2026-10-03
+
+A full review of the plugin, and what it turned up.
+
+- **A draft belongs to its conversation, and to its thread.** One message box
+  served every conversation and was emptied on every move, so a second Escape
+  out of a thread, `t` on a message, or a click on another conversation threw
+  away whatever was half-written. Each conversation and each thread now keeps
+  its own until it is sent. A send that finishes takes only its own words out
+  of the box, not the next message typed while it was going out.
+
+- **Ctrl-k opens the switcher from inside the message box.** The box took it
+  first as Qt's delete-to-end-of-line, so the one shortcut documented as
+  working from anywhere deleted text instead.
+
+- **Keys stay with what is on screen.** Enter in the conversation pane re-opened
+  the list row behind it, which closes the conversation it was on. Tab and `l`
+  could put the keyboard in a message box hidden behind a canvas or the
+  settings, where typing went into a draft nobody could see. The arrows and
+  Enter reached the list behind the help, the settings and a picture. The
+  canvas editor let arrows at its edges escape to the list. The reaction
+  picker stayed armed after moving to another conversation and swallowed every
+  letter key there. Each is fixed.
+
+- **The list cursor follows its conversation.** It was an index, so a poll that
+  reordered the list by recency moved it onto somebody else, and Enter opened
+  them.
+
+- **Nothing quiet is lost any more.** A refresh asked for while another was
+  running was replayed without its options, so a paused shell could poll and a
+  read after joining a channel could miss the join. A Refresh pressed during a
+  poll that failed was dropped. Typing faster than a switcher, mention or search
+  lookup answered left it showing results for older text. A newer "mark read"
+  for a conversation already queued was dropped. Each of these now runs or
+  merges instead.
+
+- **A conversation clicked past stays past.** Its transcript, still on its way,
+  could land under the next conversation's header or end the next one's
+  spinner early.
+
+- **A network hiccup no longer closes what you are reading.** Any failed poll on
+  a cold cache counted as signed out and closed the conversation, draft and
+  all. Only a token that no longer works does that now, and a renewal Slack
+  refuses is that case, offering the sign-in instead of an error with no way
+  forward.
+
+- **Cheaper while nothing happens.** A poll that found nothing new rebuilt
+  every row in the sidebar, the dropdown and the open transcript; now nothing
+  is rebuilt unless something changed, and the transcript keeps its selection
+  and scroll position through a poll. Opening the dropdown twice in a row costs
+  one search, not two. The narrow-window drawer is no longer a second hidden
+  copy of the sidebar. The helper starts about 10% faster and stops rewriting
+  cache files whose contents did not change.
+
+- **The helper holds up under concurrent runs and bad networks.** A cache file
+  written by two runs at once could crash one of them; a truncated or garbled
+  HTTP answer escaped as a traceback instead of an error the window can show.
+  A rate-limited channel listing no longer caches a sidebar with the channels
+  missing for a quarter of an hour, and a failed unread check no longer makes
+  an unread conversation look read. The cache is now readable by you alone.
+
+- **Typed text stays text.** A message whose rich text contained something
+  shaped like Slack's own link syntax could turn into a link whose label named
+  one address and whose target was another. A mention in the comment that rides
+  along with a file now arrives as a mention. Quoted or bracketed addresses
+  link to the address, without the quote.
+
+- **Docs match the code.** The key help lists Home/End and Ctrl-Enter, demo
+  mode is described the way it behaves, and AGENTS.md says where settings are
+  actually rendered.
 
 ### 0.12.0 — 2026-09-23
 

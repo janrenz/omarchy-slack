@@ -51,7 +51,11 @@ Item {
     if (payload) applyPayload(payload)
     window.visible = true
     focusToplevel(knownAs)
-    Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+    // Unless a draft that came with the payload has just put the keyboard in
+    // the message box - that callLater was queued first, so it has run.
+    Qt.callLater(function() {
+      if (keyCatcher && !composer.activeFocus) keyCatcher.forceActiveFocus()
+    })
   }
 
   // Bring an already-open window to the front, on the workspace somebody is
@@ -345,6 +349,15 @@ Item {
     viewingImageAlt = ""
   }
   property bool showSettings: false
+  // A layer over the conversation that is not itself a list: the arrows,
+  // Enter and Tab are not for what is behind it while it is up. Escape still
+  // is, because that is how it is closed.
+  // Through a string, which only notifies when it changes. Read straight off
+  // `service.view`, the transcript's model depended on the whole snapshot and
+  // every poll rebuilt every message - selection, hover and scroll position
+  // gone, and one image fetch per picture started again.
+  readonly property string myUserId: String(service.view.userId || "")
+  readonly property bool overlayUp: viewingImage || showHelp || showSettings
   property bool showSwitcher: false
   property bool showSearch: false
   property bool filtering: false
@@ -387,6 +400,14 @@ Item {
   // each row so that opening one closes the last, and so the keyboard and the
   // mouse are opening the same thing.
   property string pickingMessageId: ""
+  // The picker belongs to a message in what is on screen. Left armed across a
+  // move to another conversation, it swallowed every letter key there until
+  // somebody thought to press Escape.
+  Connections {
+    target: service
+    function onOpenConversationChanged() { root.pickingMessageId = "" }
+    function onThreadTsChanged() { root.pickingMessageId = "" }
+  }
 
   function messageById(id) {
     var list = service.messages
@@ -507,8 +528,11 @@ Item {
       service.uploadError = "Only a file on this machine can be sent, not a link"
       return
     }
-    var path = decodeURIComponent(url.replace(/^file:\/\//, ""))
-    if (path === "") return
+    var path = Model.localPath(url)
+    if (path === "") {
+      service.uploadError = "That file's name could not be read"
+      return
+    }
     service.uploadFile(path)
   }
 
@@ -542,12 +566,22 @@ Item {
       var kind = String(draft.kind || (channel.charAt(0) === "D" ? "im" : "channel"))
       service.openById(channel, String(draft.title || ""), kind, "")
       var thread = String(draft.thread || "")
+      // A draft for the channel itself, arriving while a thread of that
+      // channel is open, would otherwise land in the thread's box and go out
+      // as a reply.
       if (thread !== "") service.openThread(thread, null)
+      else if (service.inThread) service.closeThread()
     }
     // Nowhere to put it. Better to say so to whoever called than to drop the
     // text into a window that is not reading anything.
     if (!service.reading) return "no-conversation"
-    service.draft = text
+    // A payload can arrive twice, and somebody may already be typing here:
+    // the same text again is a no-op, and different text goes below what is
+    // there instead of over it.
+    var current = service.draft
+    if (current.trim() === "") service.draft = text
+    else if (current !== text && current.slice(-text.length) !== text)
+      service.draft = current.replace(/\s+$/, "") + "\n\n" + text
     focusPane = "conversation"
     Qt.callLater(function() { root.focusComposer() })
     return "ok"
@@ -649,7 +683,10 @@ Item {
   // not on screen would take the keys away from the conversation list and give
   // them to nothing.
   function focusComposer() {
-    if (!service.reading) return
+    // Hidden behind the canvas or the settings, it would still take focus,
+    // and every key after that went into a draft nobody could see - which
+    // Shift+Enter would then send.
+    if (!service.reading || service.canvasOpen || showSettings) return
     composer.forceActiveFocus()
   }
 
@@ -916,8 +953,8 @@ Item {
           return
         }
         // While a field has focus the rest of these belong to the text in it.
-        if (composer.activeFocus || filterField.activeFocus) return
-        if (root.showSwitcher || root.showSearch) return
+        if (composer.activeFocus || filterField.activeFocus || canvasSource.activeFocus) return
+        if (root.showSwitcher || root.showSearch || root.overlayUp) return
         var view = root.listDrawerOpen ? drawerScroll : root.scrollTarget()
         if (!view) return
         var page = Math.max(Style.space(80), view.height * 0.9)
@@ -994,11 +1031,19 @@ Item {
                 density: service.densityScale
                 palette: service.themeColors
                 showAvatars: service.wantAvatars
-                rows: service.conversations
+                // Empty while the sidebar is on screen beside the
+                // conversation: the drawer is only ever opened when it is
+                // not, and a second full copy of every row and avatar,
+                // rebuilt on every poll for nobody, was the wide layout's
+                // price for having it.
+                rows: root.listDrawerOpen || !columns.roomForBoth ? service.conversations : []
                 selectedKey: service.openConversation ? String(service.openConversation.key) : ""
                 fg: Color.foreground
                 accent: Color.accent
                 fontFamily: Style.font.family
+                onCursorMoved: function(itemY, itemHeight) {
+                  root.ensureVisible(drawerScroll, itemY, itemHeight)
+                }
                 onPicked: function(row) { root.pickListRow(row) }
               }
             }
@@ -1093,8 +1138,11 @@ Item {
         // Stands down whenever a field has focus: it consumes bare letters to
         // drive the cursor, which would eat them out of a message.
         blocked: composer.activeFocus || filterField.activeFocus || tokenBox.activeFocus
-                 || root.showSwitcher || root.showSearch
+                 || canvasSource.activeFocus || root.showSwitcher || root.showSearch
         onMoveRequested: function(dx, dy) {
+          // Something is over the conversation; the arrows are not for what
+          // is behind it.
+          if (root.overlayUp) return
           if (dy !== 0) {
             // Down and up in whatever has focus: the list's cursor, or the
             // transcript's.
@@ -1111,11 +1159,17 @@ Item {
             else root.focusComposer()
           }
         }
-        onActivateRequested: root.activeList().activateCursor()
+        // Only from the list. In the conversation pane Enter used to activate
+        // the list row again - the open conversation - and opening the one
+        // already open is how a conversation is closed.
+        onActivateRequested: {
+          if (root.overlayUp) return
+          if (root.focusPane === "list" || root.listDrawerOpen) root.activeList().activateCursor()
+        }
         onCloseRequested: root.dismiss()
         // Tab is how most people expect to reach the box they type in; l and
         // the right arrow already do it, but only for those who knew.
-        onTabRequested: root.focusComposer()
+        onTabRequested: if (!root.overlayUp) root.focusComposer()
         onTextKey: function(text) {
           var view = root.scrollTarget()
           // A picture is over everything, so it takes the keys while it is up.
@@ -1733,6 +1787,9 @@ Item {
                 text: service.filterText
                 onTextChanged: if (text !== service.filterText) service.filterText = text
                 Keys.onPressed: function(event) {
+                  if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
+                    root.openSwitcher(); event.accepted = true; return
+                  }
                   if (event.key === Qt.Key_Escape) { root.stopFiltering(true); event.accepted = true }
                   else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
                            || event.key === Qt.Key_Down) {
@@ -1834,7 +1891,11 @@ Item {
                                         : composerBox.height + answer.height + spacing)
                   - (service.inThread ? threadBack.implicitHeight + Style.spacing.sm * 2
                                         + spacing : 0)
-                  - (service.messagesError !== "" ? Style.space(20) + spacing : 0)
+                  - (messagesErrorLine.visible ? messagesErrorLine.height + spacing : 0)
+                  // The mention list grows above the box while a name is
+                  // being typed. Left out of this, it pushed the box and the
+                  // Send row off the bottom of the window mid-sentence.
+                  - (mentionList.visible ? mentionList.height + spacing : 0)
 
                 // A thread is a view of its own, and the way out of it is
                 // where the way in was: at the top, above what it contains.
@@ -1866,6 +1927,7 @@ Item {
                 }
 
                 Text {
+                  id: messagesErrorLine
                   width: parent.width
                   visible: service.messagesError !== ""
                   text: service.messagesError
@@ -2487,7 +2549,7 @@ Item {
                     onHeightChanged: if (transcript.followNewest) transcript.toNewest()
 
                     Repeater {
-                      model: Model.groupMessages(service.messages, service.view.userId, new Date())
+                      model: Model.groupMessages(service.messages, root.myUserId, new Date())
 
                       delegate: Column {
                         id: group
@@ -2590,11 +2652,19 @@ Item {
 
                                   // Walk the cursor off the edge and there is
                                   // no sign of where it went, so bring it back
-                                  // on.
-                                  onCursoredChanged: if (cursored) Qt.callLater(function() {
-                                    var pos = lineBox.mapToItem(transcriptColumn, 0, 0)
-                                    root.ensureVisible(transcript, pos.y, lineBox.height)
-                                  })
+                                  // on. Everything is taken before the
+                                  // deferral: a thread opening or a reload can
+                                  // destroy this row before the call runs, and
+                                  // a destroyed row cannot resolve ids.
+                                  onCursoredChanged: if (cursored) {
+                                    var box = lineBox, column = transcriptColumn
+                                    var view = transcript, host = root
+                                    Qt.callLater(function() {
+                                      if (!box || !box.parent) return
+                                      var pos = box.mapToItem(column, 0, 0)
+                                      host.ensureVisible(view, pos.y, box.height)
+                                    })
+                                  }
 
                                   // Which message the keys are on, and which
                                   // one a search jumped to. Behind the text
@@ -3093,6 +3163,11 @@ Item {
                             event.accepted = true
                             return
                           }
+                        }
+                        // Qt's own Ctrl+K deletes to the end of the line, and
+                        // the field takes it before the window can hear it.
+                        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_K) {
+                          root.openSwitcher(); event.accepted = true; return
                         }
                         if (event.key === Qt.Key_Escape || event.key === Qt.Key_Backtab
                             || event.key === Qt.Key_Tab) {

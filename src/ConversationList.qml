@@ -45,11 +45,32 @@ Column {
   spacing: rowGap
 
   readonly property var selectable: Model.selectableRows(rows)
+  // Row index -> position among the selectable ones, built once per list
+  // rather than an indexOf per row, which was quadratic on every poll.
+  readonly property var pickOf: {
+    var map = ({})
+    for (var i = 0; i < selectable.length; i++) map[selectable[i]] = i
+    return map
+  }
 
-  // Folding the quiet direct messages away makes the list shorter under a
-  // cursor that was already past where it now ends. Left alone, nothing is
-  // cursored until the next keypress moves it back into range.
-  onSelectableChanged: if (cursorIndex >= selectable.length) cursorIndex = selectable.length - 1
+  // The conversation under the cursor, which is what the cursor means. An
+  // index alone pointed at whatever moved into that slot when a poll
+  // reordered the list by recency, and Enter opened somebody else.
+  property string cursorKey: ""
+  onCursorIndexChanged: cursorKey = cursorIndex >= 0 && cursorIndex < selectable.length
+                        ? String(rows[selectable[cursorIndex]].key) : ""
+
+  // The list moved under the cursor: follow the conversation it was on. When
+  // that one has gone - folded away, say - stay in range rather than leave
+  // nothing cursored until the next keypress.
+  onSelectableChanged: {
+    if (cursorKey !== "") {
+      for (var i = 0; i < selectable.length; i++) {
+        if (String(rows[selectable[i]].key) === cursorKey) { cursorIndex = i; return }
+      }
+    }
+    if (cursorIndex >= selectable.length) cursorIndex = selectable.length - 1
+  }
 
   function moveCursor(step) {
     if (selectable.length === 0) return
@@ -80,7 +101,7 @@ Column {
       readonly property bool inert: isHeading || isNote
       readonly property bool isChannel: String(modelData.channelKind || "") === "channel"
       readonly property bool selected: !inert && root.selectedKey === String(modelData.key)
-      readonly property int pickIndex: root.selectable.indexOf(index)
+      readonly property int pickIndex: root.pickOf[index] === undefined ? -1 : root.pickOf[index]
       readonly property bool cursored: !inert && root.cursorIndex >= 0
                                        && root.cursorIndex === pickIndex
       onCursoredChanged: if (cursored) root.cursorMoved(y, height)

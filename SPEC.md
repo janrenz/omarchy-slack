@@ -19,7 +19,7 @@ the channel's canvas.
 | Kinds | `bar-widget`, `panel` |
 | Entry points | `src/BarWidget.qml`, `src/SlackWindow.qml` |
 | `allowMultiple` | **false** — one workspace per install |
-| Helper | `src/slack.py` (4324 lines) |
+| Helper | `src/slack.py` |
 | State | `~/.local/state/omarchy/slack/` |
 | Cache | `marks.json`, `threads.json`, `previews.json`, `fetch.lock`, `media/` |
 
@@ -418,7 +418,7 @@ variant that neuters `fixtures()` and opens a real conversation from
 
 ## 5. State model
 
-**No singleton.** `Service.qml` (1537 lines) is instantiated by `BarWidget.qml`
+**No singleton.** `Service.qml` is instantiated by `BarWidget.qml`
 and by `SlackWindow.qml`, and the bar is one surface per monitor. Coordination is
 in the helper, via `FetchSlot` (§2.4), not in QML.
 
@@ -507,20 +507,20 @@ the payload. Verified against a real workspace — parents come back with
 
 ## 8. UI surfaces
 
-### 8.1 Bar widget (`BarWidget.qml`, 188 lines)
+### 8.1 Bar widget (`BarWidget.qml`)
 
 Left click toggles the dropdown, **right click summons the window**, middle click
 refreshes. Elects `notifies` from `bar.moduleWidgets(moduleName)[0]`. The icon
 dims while `paused` is on, and the tooltip says `p` resumes.
 
-### 8.2 Dropdown (`BarPanel.qml`, 371 lines)
+### 8.2 Dropdown (`BarPanel.qml`)
 
 What is waiting, and nothing else. Every row is a way into the window. Binds to
 the bar's Service with `unreadOnly` on it, so **opening it fetches nothing**.
 Its keys are `o` (window), `r` (refresh), `m` (mark all read, asked twice) and
 `p` (pause or resume fetching), each with a button in the header.
 
-### 8.3 Window (`SlackWindow.qml`, 2972 lines)
+### 8.3 Window (`SlackWindow.qml`)
 
 Sidebar, transcript, message box, and the canvas pane — which has **no message
 box** and has the Markdown editor instead. Also the file chooser and the
@@ -689,8 +689,8 @@ Recorded because they are decisions, not omissions. Full prose in `README.md` �
 Per `PLATFORM.md` §10, plus:
 
 ```bash
-node    dev/test-model.js                          # 694 lines
-python3 dev/test-slack.py                          # 2245 lines
+node    dev/test-model.js
+python3 dev/test-slack.py
 python3 src/slack.py fetch --account work --demo
 python3 src/slack.py create-app --dry-run          # is the manifest still valid?
 dev/run.sh ; dev/shot.sh /tmp/slack.png [demo-im-0] ; dev/showcase.sh

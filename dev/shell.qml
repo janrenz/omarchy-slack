@@ -12,8 +12,10 @@ import qs.Commons
 // is being looked at is the window the shell would host - the same layout, the
 // same key handling, the same service underneath. Only two things differ: the
 // settings come from here instead of from shell.json, and `demo` is on, which
-// makes slack.py answer every read from its own fixtures and refuse every
-// write. Nothing here can touch a real workspace.
+// makes slack.py answer every read from its own fixtures and answer every
+// write as if it had happened, posting nothing. Two ways out of that, both on
+// purpose: `ipc call dev account <name>` turns demo off on a real token, and
+// the settings form or `p` saves through config.py into the real shell.json.
 ShellRoot {
   SlackWindow {
     id: panel
